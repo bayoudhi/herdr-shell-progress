@@ -32,8 +32,8 @@ _hsp_preexec() {
   local -a clear
   [[ -f "$_HSP_STATE_DIR/marker" ]] && clear=(--clear-first)
 
-  # EPOCHREALTIME is seconds.microseconds; strip the dot and divide to get ms.
-  local -i start_ms=$(( ${EPOCHREALTIME/./} / 1000 ))
+  # EPOCHREALTIME is seconds.microseconds; multiply by 1000 to get milliseconds.
+  local -i start_ms=$(( EPOCHREALTIME * 1000 ))
 
   "$HSP_BIN" watch \
     --pane "$HERDR_PANE_ID" \
