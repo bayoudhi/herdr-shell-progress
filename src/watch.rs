@@ -425,6 +425,25 @@ mod tests {
         );
     }
 
+    /// `[ui.sidebar.agents.rows_by_agent]` is validated against Herdr's own
+    /// canonical agent ids and rejects anything else — by refusing to parse the
+    /// whole config file, which drops the user's entire Herdr configuration to
+    /// defaults. The README once told people to add a `shell` key there and
+    /// broke a real config. Never ship that advice again.
+    #[test]
+    fn the_readme_never_tells_users_to_add_a_rows_by_agent_rule() {
+        let readme = include_str!("../README.md");
+        for line in readme.lines() {
+            let is_snippet = line.trim_start().starts_with(&format!("{} =", proto::AGENT_ID))
+                || line.contains(&format!("\n{} =", proto::AGENT_ID));
+            assert!(
+                !is_snippet,
+                "README appears to define a rows_by_agent rule for `{}`: {line}",
+                proto::AGENT_ID
+            );
+        }
+    }
+
     /// Two manifests carry a version: Cargo's and Herdr's. Herdr shows its own
     /// in `plugin list`, so if they drift, a user reporting a bug names a
     /// version that does not correspond to the code they are running.

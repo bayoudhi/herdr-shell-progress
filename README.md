@@ -134,36 +134,29 @@ It applies on your next command — no reload, no restart.
 Defaults: `vim`, `nvim`, `less`, `man`, `ssh`, `top`, `htop`, `zsh`, `bash`,
 `sh`, `fish`, `claude`, `codex`, `opencode`, `droid`.
 
-## Telling shell entries apart from real agents
+## Where shell commands show up
 
-Shell commands appear in the same sidebar list as your coding agents — that is
-simply where Herdr shows pane status, and there is no separate section a plugin
-can add. What this plugin does instead is report a **constant agent id**,
-`shell`, for every command, so one rule in your Herdr `config.toml` restyles all
-of them at once:
+They appear in the sidebar's **agents** list, alongside your coding agents.
+That is simply where Herdr shows pane status; a plugin cannot add a section of
+its own, and there is no setting to filter or separate them.
 
-```toml
-[ui.sidebar.agents.rows_by_agent]
-shell = [["state_icon", "workspace", "tab"], ["$cmd"]]
-```
-
-Without that rule you lose nothing: the row still shows the command name,
-because the plugin sends it as `display_agent`, which Herdr renders in
+What the plugin does do is report a **constant agent id**, `shell`, for every
+command. Without that, each distinct command would mint its own agent identity
+and your list would fill up with `cargo`, `sleep`, `make`, and every other
+binary you ever ran. One id keeps it to a single kind of entry. The row still
+shows the actual command name, sent as `display_agent`, which Herdr renders in
 preference to the id.
 
-Two values are available to a custom row:
+**These entries cannot be restyled.** Herdr's `rows_by_agent` table is validated
+against its own canonical agent ids (`claude`, `codex`, `gemini`, and so on) and
+rejects anything else. It rejects it by refusing to parse the entire config
+file, so adding a rule for this plugin does not merely fail to apply — Herdr
+silently falls back to default settings and you lose your keybindings and theme
+until you remove it. An earlier version of this README recommended exactly that;
+if you followed it, delete the rule and run `herdr config check`.
 
-| | Contains | Example |
-|---|---|---|
-| `display_agent` | the command name | `cargo` |
-| `$cmd` token | the full command line | `cargo build --release` |
-
-Styling a token is supported too, so shell rows can be dimmed or coloured to
-sit visually below your real agents:
-
-```toml
-shell = [["state_icon", "tab"], [{ token = "cmd", dim = true }]]
-```
+If you would rather a command never appear at all, that is what
+[`ignore_extra`](#ignoring-commands) is for.
 
 ## How it works
 

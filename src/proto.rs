@@ -7,16 +7,18 @@ pub const SOURCE: &str = "shell-progress";
 /// The agent id reported for every shell command, deliberately constant.
 ///
 /// Reporting the command name here would mint a new agent identity per command
-/// (`cargo`, `sleep`, `make`), which is what made shell entries indistinguishable
-/// from real agents in the sidebar. With one stable id, a single config rule
-/// styles them all:
+/// (`cargo`, `sleep`, `make`), filling the sidebar's agent list with a separate
+/// kind for every binary the user has ever run. One stable id keeps it to a
+/// single kind of entry, while the command name still reaches the row via
+/// `display_agent`, which Herdr renders in preference to the id.
 ///
-/// ```toml
-/// [ui.sidebar.agents.rows_by_agent]
-/// shell = [["state_icon", "workspace", "tab"], ["$cmd"]]
-/// ```
-///
-/// The command name still reaches the row via `display_agent`.
+/// This does NOT enable `[ui.sidebar.agents.rows_by_agent]` styling. That table
+/// is validated against Herdr's own canonical agent ids (`claude`, `codex`,
+/// `gemini`, ...) and rejects anything else — and it rejects it by refusing to
+/// parse the entire config file, so a user who adds a `shell` key there silently
+/// loses their whole Herdr configuration to defaults. An earlier README
+/// recommended exactly that and broke a real config. Do not reintroduce the
+/// suggestion.
 pub const AGENT_ID: &str = "shell";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
