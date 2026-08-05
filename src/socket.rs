@@ -19,15 +19,23 @@ pub enum SendError {
 /// Unix socket and removes any reconnect logic across server restarts.
 pub fn send(socket_path: &Path, id: &str, method: &str, params: Value) -> Result<(), SendError> {
     let mut stream = UnixStream::connect(socket_path).map_err(|_| SendError::Io)?;
-    stream.set_read_timeout(Some(TIMEOUT)).map_err(|_| SendError::Io)?;
-    stream.set_write_timeout(Some(TIMEOUT)).map_err(|_| SendError::Io)?;
+    stream
+        .set_read_timeout(Some(TIMEOUT))
+        .map_err(|_| SendError::Io)?;
+    stream
+        .set_write_timeout(Some(TIMEOUT))
+        .map_err(|_| SendError::Io)?;
 
     let line = crate::proto::envelope(id, method, params);
-    stream.write_all(line.as_bytes()).map_err(|_| SendError::Io)?;
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|_| SendError::Io)?;
     stream.flush().map_err(|_| SendError::Io)?;
 
     let mut response = String::new();
-    stream.read_to_string(&mut response).map_err(|_| SendError::Io)?;
+    stream
+        .read_to_string(&mut response)
+        .map_err(|_| SendError::Io)?;
 
     let parsed: Value = serde_json::from_str(response.trim()).map_err(|_| SendError::Io)?;
     match parsed.get("error") {
@@ -51,7 +59,13 @@ mod tests {
 
     /// Stands in for Herdr: accepts one connection, hands back the request line,
     /// replies, then closes — mirroring the real server's one-shot behavior.
-    fn fake_server(reply: &'static str) -> (tempfile::TempDir, std::path::PathBuf, mpsc::Receiver<String>) {
+    fn fake_server(
+        reply: &'static str,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        mpsc::Receiver<String>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("herdr.sock");
         let listener = UnixListener::bind(&path).unwrap();

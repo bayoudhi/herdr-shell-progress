@@ -52,6 +52,37 @@ The default `ignore` list includes agent CLIs (`claude`, `codex`, ...). Keep
 them: without them this plugin and Herdr's real agent integrations would both
 try to own the same pane's state.
 
+## Telling shell entries apart from real agents
+
+Shell commands appear in the same sidebar list as your coding agents — that is
+simply where Herdr shows pane status, and there is no separate section a plugin
+can add. What this plugin does instead is report a **constant agent id**,
+`shell`, for every command, so one rule in your Herdr `config.toml` restyles all
+of them at once:
+
+```toml
+[ui.sidebar.agents.rows_by_agent]
+shell = [["state_icon", "workspace", "tab"], ["$cmd"]]
+```
+
+Without that rule you lose nothing: the row still shows the command name,
+because the plugin sends it as `display_agent`, which Herdr renders in
+preference to the id.
+
+Two values are available to a custom row:
+
+| | Contains | Example |
+|---|---|---|
+| `display_agent` | the command name | `cargo` |
+| `$cmd` token | the full command line | `cargo build --release` |
+
+Styling a token is supported too, so shell rows can be dimmed or coloured to
+sit visually below your real agents:
+
+```toml
+shell = [["state_icon", "tab"], [{ token = "cmd", dim = true }]]
+```
+
 ## How it works
 
 `preexec` spawns a detached watcher, using only zsh builtins so the sole cost is

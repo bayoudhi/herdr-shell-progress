@@ -54,8 +54,15 @@ mod tests {
     #[test]
     fn parses_a_full_invocation() {
         let a = parse(&argv(&[
-            "watch", "--pane", "w1:p2", "--shell-pid", "4242", "--start-ms", "1754400000123",
-            "--state-dir", "/tmp/hsp",
+            "watch",
+            "--pane",
+            "w1:p2",
+            "--shell-pid",
+            "4242",
+            "--start-ms",
+            "1754400000123",
+            "--state-dir",
+            "/tmp/hsp",
         ]))
         .unwrap();
         assert_eq!(a.pane, "w1:p2");
@@ -68,8 +75,16 @@ mod tests {
     #[test]
     fn parses_the_clear_first_flag() {
         let a = parse(&argv(&[
-            "watch", "--pane", "w1:p2", "--shell-pid", "1", "--start-ms", "1", "--state-dir",
-            "/tmp/hsp", "--clear-first",
+            "watch",
+            "--pane",
+            "w1:p2",
+            "--shell-pid",
+            "1",
+            "--start-ms",
+            "1",
+            "--state-dir",
+            "/tmp/hsp",
+            "--clear-first",
         ]))
         .unwrap();
         assert!(a.clear_first);
@@ -88,7 +103,14 @@ mod tests {
     #[test]
     fn rejects_a_non_numeric_pid() {
         assert!(parse(&argv(&[
-            "watch", "--pane", "w1:p2", "--shell-pid", "abc", "--start-ms", "1", "--state-dir",
+            "watch",
+            "--pane",
+            "w1:p2",
+            "--shell-pid",
+            "abc",
+            "--start-ms",
+            "1",
+            "--state-dir",
             "/tmp/hsp",
         ]))
         .is_none());

@@ -17,6 +17,8 @@ pub enum Action {
         label: Option<(&'static str, String)>,
         ttl_ms: Option<u64>,
         clear: bool,
+        /// Rendered by the sidebar in preference to the constant agent id.
+        display_agent: Option<String>,
     },
     Release {
         agent: String,
@@ -45,7 +47,13 @@ pub struct Machine {
 
 impl Machine {
     pub fn new(cfg: Config, agent: String, title: String, start_ms: u64) -> Self {
-        Self { cfg, agent, title, start_ms, reported: false }
+        Self {
+            cfg,
+            agent,
+            title,
+            start_ms,
+            reported: false,
+        }
     }
 
     fn elapsed(&self, now_ms: u64) -> u64 {
@@ -94,10 +102,12 @@ impl Machine {
             }
             self.reported = true;
             return vec![
-                Action::MarkerWrite { agent: self.agent.clone() },
+                Action::MarkerWrite {
+                    agent: crate::proto::AGENT_ID.to_string(),
+                },
                 Action::ReportAgent {
                     state: AgentState::Working,
-                    agent: self.agent.clone(),
+                    agent: crate::proto::AGENT_ID.to_string(),
                     message: Some(self.title.clone()),
                 },
                 Action::Metadata {
@@ -105,6 +115,7 @@ impl Machine {
                     label: Some(("working", self.running_label(elapsed))),
                     ttl_ms: None,
                     clear: false,
+                    display_agent: Some(self.agent.clone()),
                 },
             ];
         }
@@ -116,6 +127,7 @@ impl Machine {
             label: Some(("working", self.running_label(elapsed))),
             ttl_ms: None,
             clear: false,
+            display_agent: Some(self.agent.clone()),
         }]
     }
 
@@ -138,7 +150,7 @@ impl Machine {
             return vec![
                 Action::ReportAgent {
                     state: AgentState::Idle,
-                    agent: self.agent.clone(),
+                    agent: crate::proto::AGENT_ID.to_string(),
                     message: None,
                 },
                 Action::Metadata {
@@ -146,6 +158,7 @@ impl Machine {
                     label: Some(("idle", text)),
                     ttl_ms: None,
                     clear: false,
+                    display_agent: Some(self.agent.clone()),
                 },
                 Action::Exit,
             ];
@@ -153,8 +166,12 @@ impl Machine {
 
         if self.cfg.finish.success_sticky_ms == 0 {
             return vec![
-                Action::Release { agent: self.agent.clone() },
-                Action::MarkerRemove { agent: self.agent.clone() },
+                Action::Release {
+                    agent: crate::proto::AGENT_ID.to_string(),
+                },
+                Action::MarkerRemove {
+                    agent: crate::proto::AGENT_ID.to_string(),
+                },
                 Action::Exit,
             ];
         }
@@ -164,7 +181,7 @@ impl Machine {
         vec![
             Action::ReportAgent {
                 state: AgentState::Idle,
-                agent: self.agent.clone(),
+                agent: crate::proto::AGENT_ID.to_string(),
                 message: None,
             },
             Action::Metadata {
@@ -172,6 +189,7 @@ impl Machine {
                 label: Some(("idle", text)),
                 ttl_ms: Some(ttl),
                 clear: false,
+                display_agent: Some(self.agent.clone()),
             },
             // TTL expires title and state_labels but not agent/agent_status, so
             // we must outlive the window to release explicitly. Linger uses the
@@ -179,8 +197,12 @@ impl Machine {
             // The driver aborts the remaining actions if the linger is cut
             // short by a newer watcher taking over.
             Action::Linger { ms: ttl },
-            Action::Release { agent: self.agent.clone() },
-            Action::MarkerRemove { agent: self.agent.clone() },
+            Action::Release {
+                agent: crate::proto::AGENT_ID.to_string(),
+            },
+            Action::MarkerRemove {
+                agent: crate::proto::AGENT_ID.to_string(),
+            },
             Action::Exit,
         ]
     }
@@ -190,8 +212,12 @@ impl Machine {
             return vec![Action::Exit];
         }
         vec![
-            Action::Release { agent: self.agent.clone() },
-            Action::MarkerRemove { agent: self.agent.clone() },
+            Action::Release {
+                agent: crate::proto::AGENT_ID.to_string(),
+            },
+            Action::MarkerRemove {
+                agent: crate::proto::AGENT_ID.to_string(),
+            },
             Action::Exit,
         ]
     }
@@ -201,9 +227,19 @@ impl Machine {
 /// marker file, because `pane.release_agent` requires the agent name.
 pub fn clear_actions(prev_agent: &str) -> Vec<Action> {
     vec![
-        Action::Metadata { title: None, label: None, ttl_ms: None, clear: true },
-        Action::Release { agent: prev_agent.to_string() },
-        Action::MarkerRemove { agent: prev_agent.to_string() },
+        Action::Metadata {
+            title: None,
+            label: None,
+            ttl_ms: None,
+            clear: true,
+            display_agent: None,
+        },
+        Action::Release {
+            agent: prev_agent.to_string(),
+        },
+        Action::MarkerRemove {
+            agent: prev_agent.to_string(),
+        },
     ]
 }
 
@@ -213,13 +249,21 @@ mod tests {
     use crate::config::Config;
 
     fn machine() -> Machine {
-        Machine::new(Config::default(), "cargo".into(), "cargo build".into(), 1_000_000)
+        Machine::new(
+            Config::default(),
+            "cargo".into(),
+            "cargo build".into(),
+            1_000_000,
+        )
     }
 
     #[test]
     fn a_fast_command_never_reports_anything() {
         let mut m = machine();
-        assert!(m.on_tick(1_000_500).is_empty(), "below threshold, stay silent");
+        assert!(
+            m.on_tick(1_000_500).is_empty(),
+            "below threshold, stay silent"
+        );
         assert_eq!(m.on_finish(1_000_800, Some(0)), vec![Action::Exit]);
     }
 
@@ -230,10 +274,12 @@ mod tests {
         assert_eq!(
             actions,
             vec![
-                Action::MarkerWrite { agent: "cargo".into() },
+                Action::MarkerWrite {
+                    agent: "shell".into()
+                },
                 Action::ReportAgent {
                     state: AgentState::Working,
-                    agent: "cargo".into(),
+                    agent: "shell".into(),
                     message: Some("cargo build".into()),
                 },
                 Action::Metadata {
@@ -241,8 +287,51 @@ mod tests {
                     label: Some(("working", "running 2s".into())),
                     ttl_ms: None,
                     clear: false,
+                    display_agent: Some("cargo".into()),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn every_command_reports_the_same_agent_id_but_its_own_display_name() {
+        // The reported agent id is constant so one rows_by_agent rule can style
+        // every shell entry; the command name reaches the sidebar via
+        // display_agent, which Herdr renders in preference to the id.
+        let mut a = Machine::new(
+            Config::default(),
+            "cargo".into(),
+            "cargo build".into(),
+            1_000_000,
+        );
+        let mut b = Machine::new(
+            Config::default(),
+            "make".into(),
+            "make all".into(),
+            1_000_000,
+        );
+
+        let ids: Vec<String> = [&mut a, &mut b]
+            .iter_mut()
+            .flat_map(|m| m.on_tick(1_002_000))
+            .filter_map(|act| match act {
+                Action::ReportAgent { agent, .. } => Some(agent),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["shell".to_string(), "shell".to_string()]);
+
+        let shown: Vec<Option<String>> = [&mut a, &mut b]
+            .iter_mut()
+            .flat_map(|m| m.on_tick(1_010_000))
+            .filter_map(|act| match act {
+                Action::Metadata { display_agent, .. } => Some(display_agent),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec![Some("cargo".to_string()), Some("make".to_string())]
         );
     }
 
@@ -262,6 +351,7 @@ mod tests {
                 label: Some(("working", "running 14s".into())),
                 ttl_ms: None,
                 clear: false,
+                display_agent: Some("cargo".into()),
             }]
         );
     }
@@ -276,7 +366,7 @@ mod tests {
             vec![
                 Action::ReportAgent {
                     state: AgentState::Idle,
-                    agent: "cargo".into(),
+                    agent: "shell".into(),
                     message: None,
                 },
                 Action::Metadata {
@@ -284,12 +374,15 @@ mod tests {
                     label: Some(("idle", "exit 1 · 4m12s".into())),
                     ttl_ms: None,
                     clear: false,
+                    display_agent: Some("cargo".into()),
                 },
                 Action::Exit,
             ]
         );
         assert!(
-            !actions.iter().any(|a| matches!(a, Action::MarkerRemove { .. })),
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::MarkerRemove { .. })),
             "the marker must survive so the next preexec clears this label"
         );
     }
@@ -304,7 +397,7 @@ mod tests {
             vec![
                 Action::ReportAgent {
                     state: AgentState::Idle,
-                    agent: "cargo".into(),
+                    agent: "shell".into(),
                     message: None,
                 },
                 Action::Metadata {
@@ -312,10 +405,15 @@ mod tests {
                     label: Some(("idle", "ok · 4m12s".into())),
                     ttl_ms: Some(20_000),
                     clear: false,
+                    display_agent: Some("cargo".into()),
                 },
                 Action::Linger { ms: 20_000 },
-                Action::Release { agent: "cargo".into() },
-                Action::MarkerRemove { agent: "cargo".into() },
+                Action::Release {
+                    agent: "shell".into()
+                },
+                Action::MarkerRemove {
+                    agent: "shell".into()
+                },
                 Action::Exit,
             ]
         );
@@ -331,8 +429,12 @@ mod tests {
         assert_eq!(
             actions,
             vec![
-                Action::Release { agent: "cargo".into() },
-                Action::MarkerRemove { agent: "cargo".into() },
+                Action::Release {
+                    agent: "shell".into()
+                },
+                Action::MarkerRemove {
+                    agent: "shell".into()
+                },
                 Action::Exit,
             ]
         );
@@ -350,6 +452,7 @@ mod tests {
                 label: Some(("idle", "SIGINT · 12s".into())),
                 ttl_ms: Some(20_000),
                 clear: false,
+                display_agent: Some("cargo".into()),
             },
             "a deliberate cancel auto-clears rather than nagging like a failure"
         );
@@ -362,7 +465,9 @@ mod tests {
         let mut m = Machine::new(cfg, "cargo".into(), "cargo build".into(), 1_000_000);
         m.on_tick(1_002_000);
         let actions = m.on_finish(1_012_000, Some(1));
-        assert!(actions.contains(&Action::MarkerRemove { agent: "cargo".into() }));
+        assert!(actions.contains(&Action::MarkerRemove {
+            agent: "shell".into()
+        }));
         assert!(actions.contains(&Action::Linger { ms: 20_000 }));
     }
 
@@ -404,6 +509,7 @@ mod tests {
                 label: Some(("idle", "12s".into())),
                 ttl_ms: Some(20_000),
                 clear: false,
+                display_agent: Some("cargo".into()),
             },
             "an unreadable exit code must not be dressed up as a success"
         );
@@ -436,7 +542,9 @@ mod tests {
             actions.contains(&Action::Linger { ms: 20_000 }),
             "a label we cannot justify must expire on its own"
         );
-        assert!(actions.contains(&Action::MarkerRemove { agent: "cargo".into() }));
+        assert!(actions.contains(&Action::MarkerRemove {
+            agent: "shell".into()
+        }));
     }
 
     #[test]
@@ -452,7 +560,7 @@ mod tests {
                 m.on_tick(1_002_000);
                 m.on_shell_gone()
             },
-            clear_actions("cargo"),
+            clear_actions("shell"),
         ] {
             let removes: Vec<_> = actions
                 .iter()
@@ -461,7 +569,7 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(removes, vec!["cargo".to_string()]);
+            assert_eq!(removes, vec!["shell".to_string()]);
         }
     }
 
@@ -475,8 +583,12 @@ mod tests {
         assert_eq!(
             reported.on_shell_gone(),
             vec![
-                Action::Release { agent: "cargo".into() },
-                Action::MarkerRemove { agent: "cargo".into() },
+                Action::Release {
+                    agent: "shell".into()
+                },
+                Action::MarkerRemove {
+                    agent: "shell".into()
+                },
                 Action::Exit,
             ]
         );
@@ -485,10 +597,30 @@ mod tests {
     #[test]
     fn next_wake_targets_the_threshold_then_the_tick_interval() {
         let mut m = machine();
-        assert_eq!(m.next_wake_ms(1_000_000), 2000, "wait out the full threshold");
+        assert_eq!(
+            m.next_wake_ms(1_000_000),
+            2000,
+            "wait out the full threshold"
+        );
         assert_eq!(m.next_wake_ms(1_001_500), 500, "only the remainder");
         m.on_tick(1_002_000);
         assert_eq!(m.next_wake_ms(1_002_000), 2000, "then the tick interval");
+    }
+
+    #[test]
+    fn clear_actions_releases_whatever_the_marker_names_even_a_legacy_command_id() {
+        // Markers now hold the constant AGENT_ID, but a marker written by an
+        // older build holds a command name. On upgrade, a pane left showing a
+        // sticky failure still has such a marker, and its reservation was made
+        // under that name — releasing AGENT_ID instead would strand it forever.
+        // So clear_actions must stay generic rather than hardcoding AGENT_ID.
+        let actions = clear_actions("cargo");
+        assert!(actions.contains(&Action::Release {
+            agent: "cargo".into()
+        }));
+        assert!(actions.contains(&Action::MarkerRemove {
+            agent: "cargo".into()
+        }));
     }
 
     #[test]
@@ -496,9 +628,19 @@ mod tests {
         assert_eq!(
             clear_actions("npm"),
             vec![
-                Action::Metadata { title: None, label: None, ttl_ms: None, clear: true },
-                Action::Release { agent: "npm".into() },
-                Action::MarkerRemove { agent: "npm".into() },
+                Action::Metadata {
+                    title: None,
+                    label: None,
+                    ttl_ms: None,
+                    clear: true,
+                    display_agent: None,
+                },
+                Action::Release {
+                    agent: "npm".into()
+                },
+                Action::MarkerRemove {
+                    agent: "npm".into()
+                },
             ]
         );
     }

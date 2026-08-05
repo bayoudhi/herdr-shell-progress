@@ -1,8 +1,8 @@
 use crate::args::Args;
+use crate::command;
 use crate::config::Config;
 use crate::proto;
 use crate::socket::{self, SendError};
-use crate::command;
 use crate::state::{self, Action, Machine};
 use signal_hook::consts::{SIGTERM, SIGUSR1};
 use std::path::{Path, PathBuf};
@@ -68,7 +68,9 @@ fn shell_alive(pid: i32) -> bool {
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 /// The exit code `precmd` wrote, or `None` when the file is missing, empty, or
@@ -215,17 +217,35 @@ impl Driver {
     fn apply(&mut self, actions: Vec<Action>, linger: &mut dyn FnMut(u64) -> Lingered) -> bool {
         for action in actions {
             let outcome = match action {
-                Action::ReportAgent { state, agent, message } => self.send(
+                Action::ReportAgent {
+                    state,
+                    agent,
+                    message,
+                } => self.send(
                     "pane.report_agent",
                     proto::report_agent(&self.pane, &agent, state, message.as_deref()),
                 ),
-                Action::Metadata { title, label, ttl_ms, clear } => self.send(
+                Action::Metadata {
+                    title,
+                    label,
+                    ttl_ms,
+                    clear,
+                    display_agent,
+                } => self.send(
                     "pane.report_metadata",
-                    proto::report_metadata(&self.pane, title, label, ttl_ms, clear),
+                    proto::report_metadata(
+                        &self.pane,
+                        title,
+                        label,
+                        ttl_ms,
+                        clear,
+                        display_agent.as_deref(),
+                    ),
                 ),
-                Action::Release { agent } => {
-                    self.send("pane.release_agent", proto::release_agent(&self.pane, &agent))
-                }
+                Action::Release { agent } => self.send(
+                    "pane.release_agent",
+                    proto::release_agent(&self.pane, &agent),
+                ),
                 Action::MarkerWrite { agent } => {
                     let _ = std::fs::write(self.marker_path(), &agent);
                     Ok(())
@@ -418,7 +438,10 @@ mod tests {
         std::fs::write(&marker, "npm").unwrap();
 
         assert!(!remove_marker_owned_by(&marker, "cargo"));
-        assert!(marker.exists(), "a marker written by another watcher must survive");
+        assert!(
+            marker.exists(),
+            "a marker written by another watcher must survive"
+        );
 
         assert!(remove_marker_owned_by(&marker, "npm"));
         assert!(!marker.exists());
@@ -467,7 +490,10 @@ mod tests {
         let marker = dir.path().join("marker");
         std::fs::write(&marker, "cargo\n").unwrap();
         assert_eq!(read_marker(&marker), Some("cargo".to_string()));
-        assert!(marker.exists(), "the clear path still has to release this agent");
+        assert!(
+            marker.exists(),
+            "the clear path still has to release this agent"
+        );
     }
 
     // ---- exit code --------------------------------------------------------
@@ -519,7 +545,10 @@ mod tests {
     fn a_finish_signal_also_cuts_the_linger_short() {
         let (tx, rx) = dead_channel();
         tx.send(SIGUSR1).unwrap();
-        assert_eq!(linger(&rx, 60_000, 10, &|| true, &|| true), Lingered::Superseded);
+        assert_eq!(
+            linger(&rx, 60_000, 10, &|| true, &|| true),
+            Lingered::Superseded
+        );
     }
 
     #[test]
@@ -540,7 +569,10 @@ mod tests {
         let (_tx, rx) = dead_channel();
         let started = Instant::now();
         assert_eq!(linger(&rx, 60, 5, &|| true, &|| true), Lingered::Completed);
-        assert!(started.elapsed() >= Duration::from_millis(50), "it really waited");
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "it really waited"
+        );
     }
 
     #[test]
@@ -626,8 +658,12 @@ mod tests {
     fn success_tail() -> Vec<Action> {
         vec![
             Action::Linger { ms: 20_000 },
-            Action::Release { agent: "cargo".into() },
-            Action::MarkerRemove { agent: "cargo".into() },
+            Action::Release {
+                agent: "cargo".into(),
+            },
+            Action::MarkerRemove {
+                agent: "cargo".into(),
+            },
             Action::Exit,
         ]
     }
@@ -646,7 +682,10 @@ mod tests {
         let keep_going = d.apply(success_tail(), &mut |_| Lingered::Superseded);
 
         assert!(!keep_going, "a superseded watcher stops immediately");
-        assert!(marker.exists(), "the marker belongs to the newer watcher now");
+        assert!(
+            marker.exists(),
+            "the marker belongs to the newer watcher now"
+        );
         assert!(
             log.lock().unwrap().is_empty(),
             "releasing here would drop the live reservation mid-command"
@@ -678,7 +717,12 @@ mod tests {
         std::fs::write(&marker, "npm").unwrap();
         let mut d = driver_for(state.path(), socket);
 
-        d.apply(vec![Action::MarkerRemove { agent: "cargo".into() }], &mut no_linger());
+        d.apply(
+            vec![Action::MarkerRemove {
+                agent: "cargo".into(),
+            }],
+            &mut no_linger(),
+        );
 
         assert!(
             marker.exists(),

@@ -29,8 +29,8 @@ fn default_failure_sticky() -> bool {
 /// outer watcher's reservation mid-command.
 fn default_ignore() -> Vec<String> {
     [
-        "vim", "nvim", "less", "man", "ssh", "top", "htop", "claude", "codex", "opencode",
-        "droid", "zsh", "bash", "sh", "fish",
+        "vim", "nvim", "less", "man", "ssh", "top", "htop", "claude", "codex", "opencode", "droid",
+        "zsh", "bash", "sh", "fish",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -209,7 +209,10 @@ mod tests {
         );
         let cfg = Config::load(Some(dir.path()));
         assert_eq!(cfg.finish.success_sticky_ms, 0);
-        assert!(cfg.finish.failure_sticky, "untouched finish key keeps default");
+        assert!(
+            cfg.finish.failure_sticky,
+            "untouched finish key keeps default"
+        );
         assert_eq!(cfg.labels.running, "busy {elapsed}");
         assert_eq!(cfg.labels.failure, "exit {code} · {elapsed}");
     }
@@ -238,10 +241,17 @@ mod tests {
     /// drift between the shipped example and the compiled default is a test
     /// failure rather than a support question.
     fn commented_ignore_list(example: &str) -> Vec<String> {
-        let start = example.find("# ignore = [").expect("commented default ignore list");
+        let start = example
+            .find("# ignore = [")
+            .expect("commented default ignore list");
         let rest = &example[start..];
         let end = rest.find(']').expect("closing bracket");
-        rest[..end].split('"').skip(1).step_by(2).map(str::to_string).collect()
+        rest[..end]
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
     }
 
     #[test]
@@ -287,6 +297,9 @@ mod tests {
         write_config(dir.path(), "ignore = [\"only-this\"]\n");
         let cfg = Config::load(Some(dir.path()));
         assert!(cfg.is_ignored("only-this"));
-        assert!(!cfg.is_ignored("claude"), "explicit ignore is a replacement");
+        assert!(
+            !cfg.is_ignored("claude"),
+            "explicit ignore is a replacement"
+        );
     }
 }
