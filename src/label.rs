@@ -3,6 +3,9 @@ pub enum Outcome {
     Success,
     Failure(i32),
     Signal(&'static str),
+    /// The exit file was missing, empty, or unparseable. Distinct from success:
+    /// a failed command must never render as `ok`.
+    Unknown,
 }
 
 /// Renders a duration the way a person reads a build time.
@@ -30,7 +33,12 @@ fn signal_name(sig: i32) -> Option<&'static str> {
     })
 }
 
-pub fn classify(exit_code: i32) -> Outcome {
+/// `None` means the exit code could not be read at all. It maps to `Unknown`
+/// rather than to `0`, so a failure never gets reported as a success.
+pub fn classify(exit_code: Option<i32>) -> Outcome {
+    let Some(exit_code) = exit_code else {
+        return Outcome::Unknown;
+    };
     if exit_code == 0 {
         return Outcome::Success;
     }
@@ -100,24 +108,34 @@ mod tests {
 
     #[test]
     fn classify_maps_zero_to_success() {
-        assert_eq!(classify(0), Outcome::Success);
+        assert_eq!(classify(Some(0)), Outcome::Success);
     }
 
     #[test]
     fn classify_maps_nonzero_to_failure() {
-        assert_eq!(classify(1), Outcome::Failure(1));
-        assert_eq!(classify(127), Outcome::Failure(127));
+        assert_eq!(classify(Some(1)), Outcome::Failure(1));
+        assert_eq!(classify(Some(127)), Outcome::Failure(127));
     }
 
     #[test]
     fn classify_maps_known_signal_exits_to_signal() {
-        assert_eq!(classify(130), Outcome::Signal("SIGINT"));
-        assert_eq!(classify(143), Outcome::Signal("SIGTERM"));
+        assert_eq!(classify(Some(130)), Outcome::Signal("SIGINT"));
+        assert_eq!(classify(Some(143)), Outcome::Signal("SIGTERM"));
     }
 
     #[test]
     fn classify_falls_back_to_failure_for_unknown_signal_numbers() {
-        assert_eq!(classify(200), Outcome::Failure(200));
+        assert_eq!(classify(Some(200)), Outcome::Failure(200));
+    }
+
+    #[test]
+    fn classify_maps_an_unreadable_exit_code_to_unknown_not_success() {
+        assert_eq!(
+            classify(None),
+            Outcome::Unknown,
+            "defaulting to 0 would render a failed command as ok"
+        );
+        assert_ne!(classify(None), Outcome::Success);
     }
 
     #[test]

@@ -20,7 +20,13 @@ mkdir -p "$_HSP_STATE_DIR"
 _hsp_preexec() {
   local cmd="$1"
 
-  # A watcher from a previous command should never outlive it.
+  # Safety net only. `precmd` zeroes _HSP_PID as soon as it has signalled the
+  # watcher, so this fires just in the odd case where precmd did not run at all.
+  # It deliberately does NOT reach a watcher that is lingering out a successful
+  # command's sticky window: keeping a dead watcher's PID around to signal later
+  # is how you eventually SIGTERM an unrelated process that inherited it. The
+  # lingering watcher notices it has been replaced on its own, by watching the
+  # marker file that the new watcher clears below.
   if (( _HSP_PID )); then
     kill -TERM $_HSP_PID 2>/dev/null
     _HSP_PID=0
@@ -50,6 +56,9 @@ _hsp_precmd() {
   (( _HSP_PID )) || return 0
   print -r -- "$code" > "$_HSP_STATE_DIR/exit"
   kill -USR1 $_HSP_PID 2>/dev/null
+  # Forget the PID immediately. The watcher may live on (a successful command
+  # keeps its label up for a while) but it is no longer ours to signal, and the
+  # PID becomes reusable by the OS the moment it does exit.
   _HSP_PID=0
 }
 

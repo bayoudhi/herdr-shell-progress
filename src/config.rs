@@ -1,6 +1,12 @@
 use serde::Deserialize;
 use std::path::Path;
 
+/// Floor for every interval the driver waits on. `tick_ms = 0` would otherwise
+/// turn the elapsed ticker into roughly a thousand socket connects per second
+/// for as long as the command runs; `threshold_ms = 0` would report every `ls`.
+/// A quarter second is faster than anyone can read and still costs nothing.
+pub const MIN_INTERVAL_MS: u64 = 250;
+
 fn default_threshold_ms() -> u64 {
     2000
 }
@@ -17,10 +23,14 @@ fn default_failure_sticky() -> bool {
     true
 }
 
+/// The shells are not cosmetic: a nested shell re-sources `init.zsh` with the
+/// same `HERDR_PANE_ID`, so inner and outer share one state directory and one
+/// marker. Without them the inner shell's `--clear-first` would release the
+/// outer watcher's reservation mid-command.
 fn default_ignore() -> Vec<String> {
     [
         "vim", "nvim", "less", "man", "ssh", "top", "htop", "claude", "codex", "opencode",
-        "droid",
+        "droid", "zsh", "bash", "sh", "fish",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -39,6 +49,11 @@ fn default_failure() -> String {
 fn default_signal() -> String {
     "{signal} · {elapsed}".to_string()
 }
+/// No exit code was readable. Elapsed only: an unknown outcome must never be
+/// dressed up as a success.
+fn default_unknown() -> String {
+    "{elapsed}".to_string()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -47,6 +62,7 @@ pub struct Labels {
     pub success: String,
     pub failure: String,
     pub signal: String,
+    pub unknown: String,
 }
 
 impl Default for Labels {
@@ -56,6 +72,7 @@ impl Default for Labels {
             success: default_success(),
             failure: default_failure(),
             signal: default_signal(),
+            unknown: default_unknown(),
         }
     }
 }
@@ -107,6 +124,12 @@ impl Config {
     /// file, unreadable file, malformed TOML — yields defaults. The watcher must
     /// never fail loudly, so a broken config degrades to stock behavior.
     pub fn load(dir: Option<&Path>) -> Config {
+        let mut cfg = Self::parse(dir);
+        cfg.sanitize();
+        cfg
+    }
+
+    fn parse(dir: Option<&Path>) -> Config {
         let Some(dir) = dir else {
             return Config::default();
         };
@@ -114,6 +137,13 @@ impl Config {
             return Config::default();
         };
         toml::from_str(&body).unwrap_or_default()
+    }
+
+    /// Pulls hostile values back into a range the driver can survive. Applied
+    /// after parsing so a user config can never make the watcher busy-loop.
+    fn sanitize(&mut self) {
+        self.tick_ms = self.tick_ms.max(MIN_INTERVAL_MS);
+        self.threshold_ms = self.threshold_ms.max(MIN_INTERVAL_MS);
     }
 
     pub fn is_ignored(&self, agent: &str) -> bool {
@@ -191,6 +221,55 @@ mod tests {
         assert!(cfg.is_ignored("codex"));
         assert!(cfg.is_ignored("vim"));
         assert!(!cfg.is_ignored("cargo"));
+    }
+
+    #[test]
+    fn default_ignore_list_covers_nested_shells() {
+        let cfg = Config::load(None);
+        for shell in ["zsh", "bash", "sh", "fish"] {
+            assert!(
+                cfg.is_ignored(shell),
+                "a nested {shell} shares the pane state dir and would fight the outer watcher"
+            );
+        }
+    }
+
+    /// Pulls the elements out of the commented `ignore = [...]` block so a
+    /// drift between the shipped example and the compiled default is a test
+    /// failure rather than a support question.
+    fn commented_ignore_list(example: &str) -> Vec<String> {
+        let start = example.find("# ignore = [").expect("commented default ignore list");
+        let rest = &example[start..];
+        let end = rest.find(']').expect("closing bracket");
+        rest[..end].split('"').skip(1).step_by(2).map(str::to_string).collect()
+    }
+
+    #[test]
+    fn the_example_config_documents_the_real_default_ignore_list() {
+        let example = include_str!("../config.example.toml");
+        assert_eq!(
+            commented_ignore_list(example),
+            default_ignore(),
+            "config.example.toml's commented default must match default_ignore() exactly"
+        );
+    }
+
+    #[test]
+    fn zero_intervals_are_clamped_to_the_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "tick_ms = 0\nthreshold_ms = 0\n");
+        let cfg = Config::load(Some(dir.path()));
+        assert_eq!(cfg.tick_ms, 250, "tick_ms = 0 would spin the socket");
+        assert_eq!(cfg.threshold_ms, 250);
+    }
+
+    #[test]
+    fn intervals_above_the_floor_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "tick_ms = 1000\nthreshold_ms = 300\n");
+        let cfg = Config::load(Some(dir.path()));
+        assert_eq!(cfg.tick_ms, 1000);
+        assert_eq!(cfg.threshold_ms, 300);
     }
 
     #[test]

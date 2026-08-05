@@ -9,7 +9,9 @@ elapsed label, and leave a result behind when they finish.
 - Fast commands are invisible — nothing flickers when you run `ls`.
 - Failures stick until your next command, so you see what broke while away.
 - Successes clear themselves after 20 seconds by default.
-- Zero socket traffic and zero output for commands under the threshold.
+- Zero socket traffic and zero output for commands under the threshold — with
+  one exception: the first command after a sticky failure label spends two
+  requests wiping it, however fast that command is.
 
 ## Requirements
 

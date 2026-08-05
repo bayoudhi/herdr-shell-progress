@@ -27,7 +27,11 @@ pub enum Action {
     MarkerWrite {
         agent: String,
     },
-    MarkerRemove,
+    /// Unlink the marker, but only if it still names `agent`. A watcher must
+    /// never delete a marker a newer watcher wrote.
+    MarkerRemove {
+        agent: String,
+    },
     Exit,
 }
 
@@ -62,6 +66,7 @@ impl Machine {
             Outcome::Success => (&self.cfg.labels.success, String::new(), String::new()),
             Outcome::Failure(c) => (&self.cfg.labels.failure, c.to_string(), String::new()),
             Outcome::Signal(name) => (&self.cfg.labels.signal, String::new(), name.to_string()),
+            Outcome::Unknown => (&self.cfg.labels.unknown, String::new(), String::new()),
         };
         let vars = vec![
             ("elapsed", label::format_elapsed(elapsed)),
@@ -111,7 +116,11 @@ impl Machine {
         }]
     }
 
-    pub fn on_finish(&mut self, now_ms: u64, exit_code: i32) -> Vec<Action> {
+    /// `exit_code` is `None` when the exit file was missing, empty, or
+    /// unparseable. That case is neither success nor failure: it renders the
+    /// elapsed-only label and takes the auto-clearing finish path, because a
+    /// label we cannot justify must not stick around demanding attention.
+    pub fn on_finish(&mut self, now_ms: u64, exit_code: Option<i32>) -> Vec<Action> {
         // Nothing was ever reported, so there is nothing to clean up.
         if !self.reported {
             return vec![Action::Exit];
@@ -142,7 +151,7 @@ impl Machine {
         if self.cfg.finish.success_sticky_ms == 0 {
             return vec![
                 Action::Release { agent: self.agent.clone() },
-                Action::MarkerRemove,
+                Action::MarkerRemove { agent: self.agent.clone() },
                 Action::Exit,
             ];
         }
@@ -164,9 +173,11 @@ impl Machine {
             // TTL expires title and state_labels but not agent/agent_status, so
             // we must outlive the window to release explicitly. Linger uses the
             // clamped value: an absurd config must not park a process for days.
+            // The driver aborts the remaining actions if the linger is cut
+            // short by a newer watcher taking over.
             Action::Linger { ms: ttl },
             Action::Release { agent: self.agent.clone() },
-            Action::MarkerRemove,
+            Action::MarkerRemove { agent: self.agent.clone() },
             Action::Exit,
         ]
     }
@@ -177,7 +188,7 @@ impl Machine {
         }
         vec![
             Action::Release { agent: self.agent.clone() },
-            Action::MarkerRemove,
+            Action::MarkerRemove { agent: self.agent.clone() },
             Action::Exit,
         ]
     }
@@ -189,7 +200,7 @@ pub fn clear_actions(prev_agent: &str) -> Vec<Action> {
     vec![
         Action::Metadata { title: None, label: None, ttl_ms: None, clear: true },
         Action::Release { agent: prev_agent.to_string() },
-        Action::MarkerRemove,
+        Action::MarkerRemove { agent: prev_agent.to_string() },
     ]
 }
 
@@ -206,7 +217,7 @@ mod tests {
     fn a_fast_command_never_reports_anything() {
         let mut m = machine();
         assert!(m.on_tick(1_000_500).is_empty(), "below threshold, stay silent");
-        assert_eq!(m.on_finish(1_000_800, 0), vec![Action::Exit]);
+        assert_eq!(m.on_finish(1_000_800, Some(0)), vec![Action::Exit]);
     }
 
     #[test]
@@ -252,7 +263,7 @@ mod tests {
     fn failure_sticks_with_no_ttl_and_keeps_the_marker() {
         let mut m = machine();
         m.on_tick(1_002_000);
-        let actions = m.on_finish(1_252_000, 1);
+        let actions = m.on_finish(1_252_000, Some(1));
         assert_eq!(
             actions,
             vec![
@@ -271,7 +282,7 @@ mod tests {
             ]
         );
         assert!(
-            !actions.contains(&Action::MarkerRemove),
+            !actions.iter().any(|a| matches!(a, Action::MarkerRemove { .. })),
             "the marker must survive so the next preexec clears this label"
         );
     }
@@ -280,7 +291,7 @@ mod tests {
     fn success_uses_a_ttl_then_lingers_and_releases() {
         let mut m = machine();
         m.on_tick(1_002_000);
-        let actions = m.on_finish(1_252_000, 0);
+        let actions = m.on_finish(1_252_000, Some(0));
         assert_eq!(
             actions,
             vec![
@@ -297,7 +308,7 @@ mod tests {
                 },
                 Action::Linger { ms: 20_000 },
                 Action::Release { agent: "cargo".into() },
-                Action::MarkerRemove,
+                Action::MarkerRemove { agent: "cargo".into() },
                 Action::Exit,
             ]
         );
@@ -309,12 +320,12 @@ mod tests {
         cfg.finish.success_sticky_ms = 0;
         let mut m = Machine::new(cfg, "cargo".into(), "cargo build".into(), 1_000_000);
         m.on_tick(1_002_000);
-        let actions = m.on_finish(1_010_000, 0);
+        let actions = m.on_finish(1_010_000, Some(0));
         assert_eq!(
             actions,
             vec![
                 Action::Release { agent: "cargo".into() },
-                Action::MarkerRemove,
+                Action::MarkerRemove { agent: "cargo".into() },
                 Action::Exit,
             ]
         );
@@ -324,7 +335,7 @@ mod tests {
     fn a_signal_exit_follows_the_success_path() {
         let mut m = machine();
         m.on_tick(1_002_000);
-        let actions = m.on_finish(1_012_000, 130);
+        let actions = m.on_finish(1_012_000, Some(130));
         assert_eq!(
             actions[1],
             Action::Metadata {
@@ -343,8 +354,8 @@ mod tests {
         cfg.finish.failure_sticky = false;
         let mut m = Machine::new(cfg, "cargo".into(), "cargo build".into(), 1_000_000);
         m.on_tick(1_002_000);
-        let actions = m.on_finish(1_012_000, 1);
-        assert!(actions.contains(&Action::MarkerRemove));
+        let actions = m.on_finish(1_012_000, Some(1));
+        assert!(actions.contains(&Action::MarkerRemove { agent: "cargo".into() }));
         assert!(actions.contains(&Action::Linger { ms: 20_000 }));
     }
 
@@ -354,7 +365,7 @@ mod tests {
         cfg.finish.success_sticky_ms = 999_999_999;
         let mut m = Machine::new(cfg, "cargo".into(), "cargo build".into(), 1_000_000);
         m.on_tick(1_002_000);
-        let actions = m.on_finish(1_012_000, 0);
+        let actions = m.on_finish(1_012_000, Some(0));
         match &actions[1] {
             Action::Metadata { ttl_ms, .. } => assert_eq!(*ttl_ms, Some(86_400_000)),
             other => panic!("expected metadata, got {other:?}"),
@@ -367,11 +378,84 @@ mod tests {
         cfg.finish.success_sticky_ms = 999_999_999;
         let mut m = Machine::new(cfg, "cargo".into(), "cargo build".into(), 1_000_000);
         m.on_tick(1_002_000);
-        let actions = m.on_finish(1_012_000, 0);
+        let actions = m.on_finish(1_012_000, Some(0));
         assert!(
             actions.contains(&Action::Linger { ms: 86_400_000 }),
             "an absurd config must not park the process for days"
         );
+    }
+
+    #[test]
+    fn an_unknown_exit_code_renders_elapsed_only_not_ok() {
+        let mut m = machine();
+        m.on_tick(1_002_000);
+        let actions = m.on_finish(1_012_000, None);
+        assert_eq!(
+            actions[1],
+            Action::Metadata {
+                title: Some("cargo build".into()),
+                label: Some(("idle", "12s".into())),
+                ttl_ms: Some(20_000),
+                clear: false,
+            },
+            "an unreadable exit code must not be dressed up as a success"
+        );
+    }
+
+    #[test]
+    fn an_unknown_exit_code_is_distinct_from_success_and_failure() {
+        let mut unknown = machine();
+        unknown.on_tick(1_002_000);
+        let unknown = unknown.on_finish(1_012_000, None);
+
+        let mut ok = machine();
+        ok.on_tick(1_002_000);
+        let ok = ok.on_finish(1_012_000, Some(0));
+
+        let mut bad = machine();
+        bad.on_tick(1_002_000);
+        let bad = bad.on_finish(1_012_000, Some(1));
+
+        assert_ne!(unknown[1], ok[1], "unknown must not read as ok");
+        assert_ne!(unknown[1], bad[1], "unknown must not claim an exit code");
+    }
+
+    #[test]
+    fn an_unknown_exit_code_auto_clears_rather_than_sticking() {
+        let mut m = machine();
+        m.on_tick(1_002_000);
+        let actions = m.on_finish(1_012_000, None);
+        assert!(
+            actions.contains(&Action::Linger { ms: 20_000 }),
+            "a label we cannot justify must expire on its own"
+        );
+        assert!(actions.contains(&Action::MarkerRemove { agent: "cargo".into() }));
+    }
+
+    #[test]
+    fn every_marker_removal_names_the_agent_that_wrote_it() {
+        for actions in [
+            {
+                let mut m = machine();
+                m.on_tick(1_002_000);
+                m.on_finish(1_012_000, Some(0))
+            },
+            {
+                let mut m = machine();
+                m.on_tick(1_002_000);
+                m.on_shell_gone()
+            },
+            clear_actions("cargo"),
+        ] {
+            let removes: Vec<_> = actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::MarkerRemove { agent } => Some(agent.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(removes, vec!["cargo".to_string()]);
+        }
     }
 
     #[test]
@@ -385,7 +469,7 @@ mod tests {
             reported.on_shell_gone(),
             vec![
                 Action::Release { agent: "cargo".into() },
-                Action::MarkerRemove,
+                Action::MarkerRemove { agent: "cargo".into() },
                 Action::Exit,
             ]
         );
@@ -407,7 +491,7 @@ mod tests {
             vec![
                 Action::Metadata { title: None, label: None, ttl_ms: None, clear: true },
                 Action::Release { agent: "npm".into() },
-                Action::MarkerRemove,
+                Action::MarkerRemove { agent: "npm".into() },
             ]
         );
     }

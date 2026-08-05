@@ -6,11 +6,18 @@ use crate::command;
 use crate::state::{self, Action, Machine};
 use signal_hook::consts::{SIGTERM, SIGUSR1};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Give up after this many consecutive socket failures.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+
+/// How often a lingering watcher re-checks whether it still owns the pane.
+/// Deliberately shorter than `config::MIN_INTERVAL_MS`: a replacement watcher
+/// clears the marker at `preexec` and only writes its own once its command
+/// crosses the threshold, so a poll strictly faster than that floor is
+/// guaranteed to land inside the gap. Costs one small file read, never a socket.
+const LINGER_POLL_MS: u64 = 100;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -29,7 +36,7 @@ fn socket_path() -> PathBuf {
     }
 }
 
-/// Must match `id` in herdr-plugin.toml.
+/// Must match `id` in herdr-plugin.toml — pinned by a test, not by discipline.
 const PLUGIN_ID: &str = "hamza.shell-progress";
 
 /// Pure fallback logic for the config directory, split out from `config_dir`
@@ -64,6 +71,121 @@ fn read_trimmed(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
+/// The exit code `precmd` wrote, or `None` when the file is missing, empty, or
+/// unparseable. Never defaults to `0`: that would render a failed command as a
+/// success, which is the one thing this plugin exists to prevent.
+fn read_exit_code(state_dir: &Path) -> Option<i32> {
+    read_trimmed(&state_dir.join("exit"))?.parse::<i32>().ok()
+}
+
+/// The agent name held by the marker, if any.
+///
+/// A zero-byte marker is removed on sight. It cannot satisfy `clear_actions`
+/// (which needs an agent name to release), yet `preexec` only tests for the
+/// file's existence — left alone it would switch `--clear-first` on for every
+/// command from now until the end of time.
+fn read_marker(path: &Path) -> Option<String> {
+    let agent = read_trimmed(path)?;
+    if agent.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return None;
+    }
+    Some(agent)
+}
+
+/// True while the marker still names `agent`.
+fn marker_names(path: &Path, agent: &str) -> bool {
+    read_trimmed(path).as_deref() == Some(agent)
+}
+
+/// Unlinks the marker only if it still names `agent`. Two watchers can be alive
+/// at once — a lingering success watcher and the one for the command you just
+/// started — and the older one must never delete the younger one's marker: that
+/// marker is what makes the next `preexec` pass `--clear-first`, and without it
+/// a sticky failure label can never be cleared again.
+fn remove_marker_owned_by(path: &Path, agent: &str) -> bool {
+    if !marker_names(path, agent) {
+        return false;
+    }
+    std::fs::remove_file(path).is_ok()
+}
+
+/// How an interruptible linger ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lingered {
+    /// The sticky window ran out (or the shell died). Finish the cleanup.
+    Completed,
+    /// A newer watcher owns this pane now. Everything queued behind the linger
+    /// belongs to somebody else's command and must not run.
+    Superseded,
+}
+
+/// Waits out the post-success sticky window without going deaf.
+///
+/// A plain `thread::sleep` here was the bug that corrupted the next command:
+/// the process sat outside the signal channel for the whole window, then woke
+/// up and ran its release and marker removal against a pane a newer watcher had
+/// already claimed. Two independent escapes now cut it short:
+///
+/// * a signal — `SIGTERM` from `zshexit`, or `SIGUSR1` that can only belong to
+///   a command we are not watching;
+/// * losing the marker — the replacement watcher removes it at `preexec` time
+///   (that is what `--clear-first` does), which is visible to us on the next
+///   poll and does not depend on any signal being deliverable.
+fn linger(
+    rx: &Receiver<i32>,
+    total_ms: u64,
+    poll_ms: u64,
+    still_ours: &dyn Fn() -> bool,
+    alive: &dyn Fn() -> bool,
+) -> Lingered {
+    let deadline = Instant::now() + Duration::from_millis(total_ms);
+    let poll = Duration::from_millis(poll_ms.max(1));
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Lingered::Completed;
+        }
+        let slice = remaining.min(poll);
+        match rx.recv_timeout(slice) {
+            Ok(_) => return Lingered::Superseded,
+            Err(RecvTimeoutError::Timeout) => {}
+            // No signal will ever arrive again; keep the ownership and orphan
+            // checks running on a timer rather than releasing early.
+            Err(RecvTimeoutError::Disconnected) => std::thread::sleep(slice),
+        }
+        if !still_ours() {
+            return Lingered::Superseded;
+        }
+        if !alive() {
+            // Nobody is left to clear this pane for us. Release now instead of
+            // holding the reservation for the rest of the window.
+            return Lingered::Completed;
+        }
+    }
+}
+
+/// Idles until the shell signals us or dies, touching neither socket nor disk.
+///
+/// Every path that has nothing left to report ends here rather than returning.
+/// `precmd` sends `kill -USR1 $_HSP_PID` whenever the command finishes, which
+/// may be minutes later; a watcher that exited early leaves the shell holding a
+/// PID the OS is free to hand to somebody else, and SIGUSR1's default
+/// disposition is to terminate whoever receives it.
+fn park(rx: &Receiver<i32>, poll_ms: u64, alive: &dyn Fn() -> bool) -> i32 {
+    let poll = Duration::from_millis(poll_ms.max(1));
+    loop {
+        match rx.recv_timeout(poll) {
+            Ok(_) => return 0,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => std::thread::sleep(poll),
+        }
+        if !alive() {
+            return 0;
+        }
+    }
+}
+
 struct Driver {
     pane: String,
     state_dir: PathBuf,
@@ -90,7 +212,7 @@ impl Driver {
     }
 
     /// Returns false when the driver should stop entirely.
-    fn apply(&mut self, actions: Vec<Action>) -> bool {
+    fn apply(&mut self, actions: Vec<Action>, linger: &mut dyn FnMut(u64) -> Lingered) -> bool {
         for action in actions {
             let outcome = match action {
                 Action::ReportAgent { state, agent, message } => self.send(
@@ -108,14 +230,16 @@ impl Driver {
                     let _ = std::fs::write(self.marker_path(), &agent);
                     Ok(())
                 }
-                Action::MarkerRemove => {
-                    let _ = std::fs::remove_file(self.marker_path());
+                Action::MarkerRemove { agent } => {
+                    remove_marker_owned_by(&self.marker_path(), &agent);
                     Ok(())
                 }
-                Action::Linger { ms } => {
-                    std::thread::sleep(Duration::from_millis(ms));
-                    Ok(())
-                }
+                Action::Linger { ms } => match linger(ms) {
+                    Lingered::Completed => Ok(()),
+                    // Drop the release and the marker removal on the floor: a
+                    // newer watcher owns this pane and both would corrupt it.
+                    Lingered::Superseded => return false,
+                },
                 Action::Exit => return false,
             };
 
@@ -129,8 +253,14 @@ impl Driver {
     }
 }
 
+/// For action lists that cannot contain `Linger`.
+fn no_linger() -> impl FnMut(u64) -> Lingered {
+    |_| Lingered::Completed
+}
+
 pub fn run(args: Args) -> i32 {
     let cfg = Config::load(config_dir().as_deref());
+    let tick_ms = cfg.tick_ms;
 
     let cmd_line = read_trimmed(&args.state_dir.join("cmd")).unwrap_or_default();
     let agent = command::agent_name(&cmd_line);
@@ -144,28 +274,18 @@ pub fn run(args: Args) -> i32 {
         seq: 0,
     };
 
-    // Clear a sticky label from the previous command before anything else, even
-    // for an ignored command — otherwise a stale label would outlive its welcome.
-    if args.clear_first {
-        if let Some(prev_agent) = read_trimmed(&driver.marker_path()) {
-            if !prev_agent.is_empty() {
-                driver.apply(state::clear_actions(&prev_agent));
-            }
-        }
-    }
-
-    if cfg.is_ignored(&agent) {
-        return 0;
-    }
-
     // A very fast command can deliver SIGUSR1 before this handler is installed.
     // The default disposition for SIGUSR1 is terminate, so the watcher dies
     // having reported nothing — which is exactly right for a fast command. Do
-    // not "fix" this by installing the handler earlier or blocking the signal;
-    // the race resolves correctly and any change must preserve that outcome.
+    // not "fix" this by blocking the signal; the race resolves correctly and any
+    // change must preserve that outcome. Installing the handler this early is
+    // safe because it preserves it deliberately: an early SIGUSR1 that we do
+    // catch finds `reported == false` and exits just as silently.
     let (tx, rx) = mpsc::channel::<i32>();
     let mut signals = match signal_hook::iterator::Signals::new([SIGUSR1, SIGTERM]) {
         Ok(s) => s,
+        // Nothing to install and nothing safe to do: without a handler this
+        // process dies on the shell's SIGUSR1 anyway.
         Err(_) => return 0,
     };
     std::thread::spawn(move || {
@@ -176,32 +296,63 @@ pub fn run(args: Args) -> i32 {
         }
     });
 
+    // Clear a sticky label from the previous command before anything else, even
+    // for an ignored command — otherwise a stale label would outlive its welcome.
+    let mut pane_usable = true;
+    if args.clear_first {
+        if let Some(prev_agent) = read_marker(&driver.marker_path()) {
+            pane_usable = driver.apply(state::clear_actions(&prev_agent), &mut no_linger());
+        }
+    }
+
+    // Ignored commands and dead panes have nothing left to say, but they must
+    // still outlive `precmd`'s SIGUSR1. See `park`.
+    if !pane_usable || cfg.is_ignored(&agent) {
+        return park(&rx, tick_ms, &|| shell_alive(args.shell_pid));
+    }
+
+    let marker = driver.marker_path();
+    let own_agent = agent.clone();
     let mut machine = Machine::new(cfg, agent, title, args.start_ms);
 
     loop {
         let wait = machine.next_wake_ms(now_ms()).max(1);
         match rx.recv_timeout(Duration::from_millis(wait)) {
             Ok(SIGUSR1) => {
-                let code = read_trimmed(&args.state_dir.join("exit"))
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .unwrap_or(0);
-                driver.apply(machine.on_finish(now_ms(), code));
+                let code = read_exit_code(&args.state_dir);
+                let actions = machine.on_finish(now_ms(), code);
+                driver.apply(actions, &mut |ms| {
+                    linger(
+                        &rx,
+                        ms,
+                        LINGER_POLL_MS,
+                        &|| marker_names(&marker, &own_agent),
+                        &|| shell_alive(args.shell_pid),
+                    )
+                });
                 return 0;
             }
             Ok(_) => {
-                driver.apply(machine.on_shell_gone());
+                driver.apply(machine.on_shell_gone(), &mut no_linger());
                 return 0;
             }
             Err(RecvTimeoutError::Timeout) => {
                 if !shell_alive(args.shell_pid) {
-                    driver.apply(machine.on_shell_gone());
+                    driver.apply(machine.on_shell_gone(), &mut no_linger());
                     return 0;
                 }
-                if !driver.apply(machine.on_tick(now_ms())) {
-                    return 0;
+                if !driver.apply(machine.on_tick(now_ms()), &mut no_linger()) {
+                    // The pane is gone or the socket gave up. Nothing more can
+                    // be reported, but the shell still holds our PID.
+                    return park(&rx, tick_ms, &|| shell_alive(args.shell_pid));
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => return 0,
+            // The signal thread is gone, so the finish signal will never
+            // arrive. Do not leave the pane parked at `working`.
+            Err(RecvTimeoutError::Disconnected) => {
+                driver.apply(machine.on_shell_gone(), &mut no_linger());
+                return 0;
+            }
         }
     }
 }
@@ -209,6 +360,9 @@ pub fn run(args: Args) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn env_value_set_and_nonempty_is_used_verbatim() {
@@ -231,6 +385,304 @@ mod tests {
         assert_eq!(
             dir,
             PathBuf::from("/Users/whoever/.config/herdr/plugins/config/hamza.shell-progress")
+        );
+    }
+
+    #[test]
+    fn the_plugin_id_matches_the_manifest() {
+        let manifest = include_str!("../herdr-plugin.toml");
+        // Only the top-level table: `[[actions]]` further down has its own `id`.
+        let id = manifest
+            .lines()
+            .take_while(|l| !l.trim_start().starts_with('['))
+            .find_map(|l| l.trim().strip_prefix("id"))
+            .and_then(|rest| rest.trim().strip_prefix('='))
+            .map(|v| v.trim().trim_matches('"'))
+            .expect("herdr-plugin.toml must declare a top-level id");
+        assert_eq!(
+            id, PLUGIN_ID,
+            "renaming the plugin id without updating PLUGIN_ID silently moves the config directory"
+        );
+    }
+
+    // ---- marker ownership -------------------------------------------------
+
+    fn state_dir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn a_marker_is_removed_only_by_the_agent_that_owns_it() {
+        let dir = state_dir();
+        let marker = dir.path().join("marker");
+        std::fs::write(&marker, "npm").unwrap();
+
+        assert!(!remove_marker_owned_by(&marker, "cargo"));
+        assert!(marker.exists(), "a marker written by another watcher must survive");
+
+        assert!(remove_marker_owned_by(&marker, "npm"));
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn removing_an_absent_marker_is_a_no_op() {
+        let dir = state_dir();
+        assert!(!remove_marker_owned_by(&dir.path().join("marker"), "cargo"));
+    }
+
+    #[test]
+    fn a_trailing_newline_does_not_break_marker_ownership() {
+        let dir = state_dir();
+        let marker = dir.path().join("marker");
+        std::fs::write(&marker, "cargo\n").unwrap();
+        assert!(marker_names(&marker, "cargo"));
+        assert!(remove_marker_owned_by(&marker, "cargo"));
+    }
+
+    #[test]
+    fn an_empty_marker_is_removed_rather_than_left_to_force_clear_first() {
+        let dir = state_dir();
+        let marker = dir.path().join("marker");
+        std::fs::write(&marker, "").unwrap();
+
+        assert_eq!(read_marker(&marker), None);
+        assert!(
+            !marker.exists(),
+            "an empty marker would switch --clear-first on forever"
+        );
+    }
+
+    #[test]
+    fn a_whitespace_only_marker_is_also_removed() {
+        let dir = state_dir();
+        let marker = dir.path().join("marker");
+        std::fs::write(&marker, "\n  \n").unwrap();
+        assert_eq!(read_marker(&marker), None);
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn a_populated_marker_is_read_and_kept() {
+        let dir = state_dir();
+        let marker = dir.path().join("marker");
+        std::fs::write(&marker, "cargo\n").unwrap();
+        assert_eq!(read_marker(&marker), Some("cargo".to_string()));
+        assert!(marker.exists(), "the clear path still has to release this agent");
+    }
+
+    // ---- exit code --------------------------------------------------------
+
+    #[test]
+    fn a_missing_exit_file_reads_as_unknown_not_zero() {
+        let dir = state_dir();
+        assert_eq!(read_exit_code(dir.path()), None);
+    }
+
+    #[test]
+    fn an_empty_or_unparseable_exit_file_reads_as_unknown() {
+        let dir = state_dir();
+        std::fs::write(dir.path().join("exit"), "").unwrap();
+        assert_eq!(read_exit_code(dir.path()), None);
+        std::fs::write(dir.path().join("exit"), "not-a-number").unwrap();
+        assert_eq!(read_exit_code(dir.path()), None);
+    }
+
+    #[test]
+    fn a_real_exit_file_reads_its_code() {
+        let dir = state_dir();
+        std::fs::write(dir.path().join("exit"), "1\n").unwrap();
+        assert_eq!(read_exit_code(dir.path()), Some(1));
+        std::fs::write(dir.path().join("exit"), "0\n").unwrap();
+        assert_eq!(read_exit_code(dir.path()), Some(0));
+    }
+
+    // ---- linger -----------------------------------------------------------
+
+    fn dead_channel() -> (mpsc::Sender<i32>, Receiver<i32>) {
+        mpsc::channel()
+    }
+
+    #[test]
+    fn a_signal_cuts_the_linger_short() {
+        let (tx, rx) = dead_channel();
+        tx.send(SIGTERM).unwrap();
+        let started = Instant::now();
+        let outcome = linger(&rx, 60_000, 10, &|| true, &|| true);
+        assert_eq!(outcome, Lingered::Superseded);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "SIGTERM must not wait out the sticky window"
+        );
+    }
+
+    #[test]
+    fn a_finish_signal_also_cuts_the_linger_short() {
+        let (tx, rx) = dead_channel();
+        tx.send(SIGUSR1).unwrap();
+        assert_eq!(linger(&rx, 60_000, 10, &|| true, &|| true), Lingered::Superseded);
+    }
+
+    #[test]
+    fn losing_the_marker_cuts_the_linger_short_without_any_signal() {
+        let (_tx, rx) = dead_channel();
+        let started = Instant::now();
+        let outcome = linger(&rx, 60_000, 5, &|| false, &|| true);
+        assert_eq!(
+            outcome,
+            Lingered::Superseded,
+            "the replacement watcher clears the marker; that alone must be enough"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn an_undisturbed_linger_runs_to_completion() {
+        let (_tx, rx) = dead_channel();
+        let started = Instant::now();
+        assert_eq!(linger(&rx, 60, 5, &|| true, &|| true), Lingered::Completed);
+        assert!(started.elapsed() >= Duration::from_millis(50), "it really waited");
+    }
+
+    #[test]
+    fn a_dead_shell_ends_the_linger_but_still_releases() {
+        let (_tx, rx) = dead_channel();
+        assert_eq!(
+            linger(&rx, 60_000, 5, &|| true, &|| false),
+            Lingered::Completed,
+            "nobody is left to clear the pane, so hand the reservation back now"
+        );
+    }
+
+    // ---- park -------------------------------------------------------------
+
+    #[test]
+    fn park_returns_when_signalled() {
+        let (tx, rx) = dead_channel();
+        tx.send(SIGUSR1).unwrap();
+        assert_eq!(park(&rx, 10, &|| true), 0);
+    }
+
+    #[test]
+    fn park_returns_when_the_shell_dies() {
+        let (_tx, rx) = dead_channel();
+        assert_eq!(park(&rx, 5, &|| false), 0);
+    }
+
+    #[test]
+    fn park_idles_instead_of_exiting_while_the_shell_is_alive() {
+        let (tx, rx) = dead_channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            let _ = tx.send(SIGUSR1);
+        });
+        let started = Instant::now();
+        park(&rx, 5, &|| true);
+        assert!(
+            started.elapsed() >= Duration::from_millis(60),
+            "exiting early would leave the shell signalling a recyclable PID"
+        );
+    }
+
+    // ---- apply ------------------------------------------------------------
+
+    /// Stands in for Herdr: one request per connection, then close. Records the
+    /// method of every request it is sent.
+    fn fake_server(dir: &Path) -> (PathBuf, Arc<Mutex<Vec<String>>>) {
+        let path = dir.join("herdr.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    break;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    if let Some(m) = v["method"].as_str() {
+                        sink.lock().unwrap().push(m.to_string());
+                    }
+                }
+                let mut stream = reader.into_inner();
+                let _ = stream.write_all(b"{\"id\":\"1\",\"result\":{\"type\":\"ok\"}}\n");
+            }
+        });
+        (path, log)
+    }
+
+    fn driver_for(state: &Path, socket: PathBuf) -> Driver {
+        Driver {
+            pane: "w1:p2".into(),
+            state_dir: state.into(),
+            socket,
+            failures: 0,
+            seq: 0,
+        }
+    }
+
+    /// Exactly what `on_finish` emits for a successful slow command.
+    fn success_tail() -> Vec<Action> {
+        vec![
+            Action::Linger { ms: 20_000 },
+            Action::Release { agent: "cargo".into() },
+            Action::MarkerRemove { agent: "cargo".into() },
+            Action::Exit,
+        ]
+    }
+
+    #[test]
+    fn a_superseded_linger_neither_releases_nor_removes_the_marker() {
+        let sockdir = state_dir();
+        let (socket, log) = fake_server(sockdir.path());
+        let state = state_dir();
+        let marker = state.path().join("marker");
+        // The replacement watcher's marker, which happens to name a different
+        // command. The stale watcher must leave it completely alone.
+        std::fs::write(&marker, "npm").unwrap();
+        let mut d = driver_for(state.path(), socket);
+
+        let keep_going = d.apply(success_tail(), &mut |_| Lingered::Superseded);
+
+        assert!(!keep_going, "a superseded watcher stops immediately");
+        assert!(marker.exists(), "the marker belongs to the newer watcher now");
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "releasing here would drop the live reservation mid-command"
+        );
+    }
+
+    #[test]
+    fn a_completed_linger_releases_and_removes_its_own_marker() {
+        let sockdir = state_dir();
+        let (socket, log) = fake_server(sockdir.path());
+        let state = state_dir();
+        let marker = state.path().join("marker");
+        std::fs::write(&marker, "cargo").unwrap();
+        let mut d = driver_for(state.path(), socket);
+
+        let keep_going = d.apply(success_tail(), &mut |_| Lingered::Completed);
+
+        assert!(!keep_going, "the action list ends in Exit");
+        assert!(!marker.exists(), "our own marker goes away with us");
+        assert_eq!(*log.lock().unwrap(), vec!["pane.release_agent".to_string()]);
+    }
+
+    #[test]
+    fn apply_never_deletes_a_marker_another_watcher_wrote() {
+        let sockdir = state_dir();
+        let (socket, _log) = fake_server(sockdir.path());
+        let state = state_dir();
+        let marker = state.path().join("marker");
+        std::fs::write(&marker, "npm").unwrap();
+        let mut d = driver_for(state.path(), socket);
+
+        d.apply(vec![Action::MarkerRemove { agent: "cargo".into() }], &mut no_linger());
+
+        assert!(
+            marker.exists(),
+            "without this guard the next command's sticky failure could never be cleared"
         );
     }
 }

@@ -2,14 +2,20 @@
 #   herdr plugin config-dir hamza.shell-progress
 # and rename to config.toml. Every key is optional.
 
-threshold_ms  = 2000    # how long before a command counts as "slow"
-tick_ms       = 2000    # elapsed-label refresh interval
+threshold_ms  = 2000    # how long before a command counts as "slow" (floor 250)
+tick_ms       = 2000    # elapsed-label refresh interval (floor 250)
 max_title_len = 60      # command line truncation in the title field
 
+# threshold_ms and tick_ms are clamped up to 250 ms. Below that the elapsed
+# ticker would connect to the socket hundreds of times a second for the whole
+# duration of the command, and no label refreshes usefully that fast anyway.
+
 # Commands never tracked. Matched on the basename of the first word.
-# Setting this REPLACES the defaults.
+# Setting this REPLACES the defaults. Keep the shells: a nested shell inherits
+# HERDR_PANE_ID, so it would share this pane's marker and fight the outer
+# watcher for the pane's state.
 # ignore = ["vim", "nvim", "less", "man", "ssh", "top", "htop",
-#           "claude", "codex", "opencode", "droid"]
+#           "claude", "codex", "opencode", "droid", "zsh", "bash", "sh", "fish"]
 
 # Added to the defaults instead of replacing them.
 ignore_extra = []
@@ -23,3 +29,4 @@ running = "running {elapsed}"
 success = "ok · {elapsed}"
 failure = "exit {code} · {elapsed}"
 signal  = "{signal} · {elapsed}"
+unknown = "{elapsed}"          # exit code unreadable: elapsed only, never "ok"
