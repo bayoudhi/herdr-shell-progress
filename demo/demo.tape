@@ -31,6 +31,12 @@ Hide
 Type "env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH herdr --session demo"
 Enter
 Sleep 6s
+
+# Wipe whatever the login shell printed into the pane (a ~/.zprofile greeting,
+# an MOTD) so the recording starts from a clean prompt.
+Type "clear"
+Enter
+Sleep 1s
 Show
 
 # A fast command leaves no trace at all — nothing appears in the sidebar.

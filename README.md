@@ -6,6 +6,11 @@ Herdr shows live progress for recognized coding agents. A pane running
 This plugin fixes that: slow shell commands report `working` with a ticking
 elapsed label, and leave a result behind when they finish.
 
+![demo](demo/demo.gif)
+
+*`ls` leaves no trace; `sleep 6` crosses the threshold and appears in the
+sidebar as `sleep · running 4s`.*
+
 - Fast commands are invisible — nothing flickers when you run `ls`.
 - Failures stick until your next command, so you see what broke while away.
 - Successes clear themselves after 20 seconds by default.
@@ -157,6 +162,31 @@ if you followed it, delete the rule and run `herdr config check`.
 
 If you would rather a command never appear at all, that is what
 [`ignore_extra`](#ignoring-commands) is for.
+
+### Showing the elapsed label
+
+Herdr's default sidebar rows are:
+
+```toml
+rows = [["state_icon", "workspace", "tab"], ["agent"]]
+```
+
+There is no `state_text` in there, so out of the box you get the spinner and the
+command name but **not** the `running 4s` label — the plugin reports it, and
+nothing displays it. To see what the demo above shows, add `state_text` to the
+second row in your Herdr `config.toml`:
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "workspace", "tab"], ["agent", "state_text"]]
+```
+
+Then `herdr config check` and `herdr server reload-config`. This is the plain
+`rows` key, which accepts any of Herdr's built-in row fields — unlike
+`rows_by_agent` above, it is not restricted to canonical agent ids.
+
+This also affects the finish labels: `ok · 4s`, `exit 1 · 12s`, and `SIGINT · 3s`
+all live in `state_text`.
 
 ## How it works
 
