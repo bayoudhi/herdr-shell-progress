@@ -29,8 +29,29 @@ fn socket_path() -> PathBuf {
     }
 }
 
+/// Must match `id` in herdr-plugin.toml.
+const PLUGIN_ID: &str = "hamza.shell-progress";
+
+/// Pure fallback logic for the config directory, split out from `config_dir`
+/// so the `$HOME`-based default can be unit tested without mutating
+/// process-global environment state.
+fn resolve_config_dir(env_value: Option<&str>, home: &str) -> PathBuf {
+    match env_value {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => PathBuf::from(home)
+            .join(".config/herdr/plugins/config")
+            .join(PLUGIN_ID),
+    }
+}
+
+/// This watcher is spawned by the user's zsh `preexec` hook, not by Herdr, so
+/// `HERDR_PLUGIN_CONFIG_DIR` (which Herdr injects only into processes it
+/// spawns itself) is never set here in practice. Always fall back to the
+/// real config directory Herdr uses for this plugin.
 fn config_dir() -> Option<PathBuf> {
-    std::env::var("HERDR_PLUGIN_CONFIG_DIR").ok().map(PathBuf::from)
+    let env_value = std::env::var("HERDR_PLUGIN_CONFIG_DIR").ok();
+    let home = std::env::var("HOME").unwrap_or_default();
+    Some(resolve_config_dir(env_value.as_deref(), &home))
 }
 
 /// True while the shell that spawned us is still alive. Signal 0 checks for
@@ -182,5 +203,34 @@ pub fn run(args: Args) -> i32 {
             }
             Err(RecvTimeoutError::Disconnected) => return 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_value_set_and_nonempty_is_used_verbatim() {
+        let dir = resolve_config_dir(Some("/custom/config/dir"), "/Users/whoever");
+        assert_eq!(dir, PathBuf::from("/custom/config/dir"));
+    }
+
+    #[test]
+    fn env_value_unset_falls_back_to_home_based_path() {
+        let dir = resolve_config_dir(None, "/Users/whoever");
+        assert_eq!(
+            dir,
+            PathBuf::from("/Users/whoever/.config/herdr/plugins/config/hamza.shell-progress")
+        );
+    }
+
+    #[test]
+    fn env_value_empty_falls_back_to_home_based_path() {
+        let dir = resolve_config_dir(Some(""), "/Users/whoever");
+        assert_eq!(
+            dir,
+            PathBuf::from("/Users/whoever/.config/herdr/plugins/config/hamza.shell-progress")
+        );
     }
 }
