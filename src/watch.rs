@@ -37,7 +37,7 @@ fn socket_path() -> PathBuf {
 }
 
 /// Must match `id` in herdr-plugin.toml — pinned by a test, not by discipline.
-const PLUGIN_ID: &str = "hamza.shell-progress";
+const PLUGIN_ID: &str = "bayoudhi.shell-progress";
 
 /// Pure fallback logic for the config directory, split out from `config_dir`
 /// so the `$HOME`-based default can be unit tested without mutating
@@ -436,7 +436,7 @@ mod tests {
         let dir = resolve_config_dir(None, "/Users/whoever");
         assert_eq!(
             dir,
-            PathBuf::from("/Users/whoever/.config/herdr/plugins/config/hamza.shell-progress")
+            PathBuf::from("/Users/whoever/.config/herdr/plugins/config/bayoudhi.shell-progress")
         );
     }
 
@@ -445,7 +445,7 @@ mod tests {
         let dir = resolve_config_dir(Some(""), "/Users/whoever");
         assert_eq!(
             dir,
-            PathBuf::from("/Users/whoever/.config/herdr/plugins/config/hamza.shell-progress")
+            PathBuf::from("/Users/whoever/.config/herdr/plugins/config/bayoudhi.shell-progress")
         );
     }
 

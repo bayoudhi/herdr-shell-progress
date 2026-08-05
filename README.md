@@ -16,33 +16,53 @@ elapsed label, and leave a result behind when they finish.
 ## Requirements
 
 - Herdr >= 0.7.0
-- zsh
-- Rust toolchain (to build)
+- **zsh** — the hooks are zsh-only (`preexec`/`precmd`). bash and fish are not
+  supported; see [Porting to another shell](#porting-to-another-shell).
+- **A Rust toolchain** — installation compiles the watcher from source. There
+  are no prebuilt binaries.
+- macOS or Linux. Developed and tested on macOS; the Rust and zsh sides are both
+  portable and Linux should work, but it has not been run there. Reports welcome.
 
 ## Install
 
 ```bash
-git clone <this-repo> ~/herdr-shell-progress
+herdr plugin install bayoudhi/herdr-shell-progress
+```
+
+That runs `cargo build --release` for you.
+
+Now add the hook to your `.zshrc`. Installed plugins live under a
+content-hashed directory, so ask for the right line rather than guessing it:
+
+```bash
+herdr plugin action invoke bayoudhi.shell-progress.print-snippet
+```
+
+It prints a `source ...` line for your machine. Append that to `~/.zshrc`.
+
+Open a new pane, run `sleep 5`, and watch the sidebar.
+
+**The `source` line is required.** Installing the plugin alone does nothing:
+Herdr can run a plugin's own processes, but only your shell can tell it when a
+command starts and stops, so the hooks have to live in your shell.
+
+### From a clone instead
+
+```bash
+git clone https://github.com/bayoudhi/herdr-shell-progress ~/herdr-shell-progress
 cd ~/herdr-shell-progress
 cargo build --release
 herdr plugin link ~/herdr-shell-progress
+echo 'source ~/herdr-shell-progress/shell/init.zsh' >> ~/.zshrc
 ```
 
-`herdr plugin link` does not run build commands, so the `cargo build` above is
-required.
-
-Then add to `.zshrc`:
-
-```zsh
-source ~/herdr-shell-progress/shell/init.zsh
-```
-
-Open a new pane. Run `sleep 5` and watch the sidebar.
+`herdr plugin link` deliberately does *not* run build commands, so the
+`cargo build` is required here.
 
 ## Configure
 
 ```bash
-herdr plugin config-dir hamza.shell-progress
+herdr plugin config-dir bayoudhi.shell-progress
 ```
 
 Copy `config.example.toml` into that directory as `config.toml`. Every key is
@@ -94,10 +114,31 @@ exit code and signals the watcher, which posts the final label and exits.
 The watcher writes nothing to stdout or stderr — it inherits the pane's tty, so
 any output would corrupt your shell session.
 
+## Porting to another shell
+
+The Rust watcher is shell-agnostic. Everything shell-specific lives in
+`shell/init.zsh`, which is about 50 lines, and a port needs to do three things:
+
+1. On command start: write the command line to `<state-dir>/cmd`, then spawn
+   `herdr-shell-progress watch --pane "$HERDR_PANE_ID" --shell-pid <shell pid>
+   --start-ms <epoch ms> --state-dir <state-dir>`, detached, with both streams
+   redirected to `/dev/null`. Pass `--clear-first` if `<state-dir>/marker` exists.
+2. On command end: write `$?` to `<state-dir>/exit`, then send `SIGUSR1` to the
+   watcher.
+3. On shell exit: send `SIGTERM` to the watcher.
+
+bash can do this with `trap DEBUG` plus `PROMPT_COMMAND`, though getting exactly
+one spawn per command out of `trap DEBUG` is the fiddly part. PRs welcome.
+
 ## Uninstall
 
 ```bash
-herdr plugin unlink hamza.shell-progress
+herdr plugin uninstall bayoudhi.shell-progress
 ```
 
-Then remove the `source` line from `.zshrc`.
+Use `herdr plugin unlink bayoudhi.shell-progress` instead if you installed from
+a clone with `plugin link`.
+
+Then remove the `source` line from `.zshrc`. That line is what actually runs the
+plugin, so leaving it behind after uninstalling leaves a dangling `source` that
+your shell will complain about on every new pane.

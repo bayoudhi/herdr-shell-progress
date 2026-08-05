@@ -1,9 +1,9 @@
-id = "hamza.shell-progress"
+id = "bayoudhi.shell-progress"
 name = "Shell Progress"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
 description = "Shows sidebar progress for slow shell commands, not just agents"
-platforms = ["linux", "macos"]
+platforms = ["macos", "linux"]
 
 [[build]]
 command = ["cargo", "build", "--release"]

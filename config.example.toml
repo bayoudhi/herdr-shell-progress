@@ -1,5 +1,5 @@
 # Copy to the directory reported by:
-#   herdr plugin config-dir hamza.shell-progress
+#   herdr plugin config-dir bayoudhi.shell-progress
 # and rename to config.toml. Every key is optional.
 
 threshold_ms  = 2000    # how long before a command counts as "slow" (floor 250)
