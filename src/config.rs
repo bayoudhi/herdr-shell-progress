@@ -226,6 +226,35 @@ mod tests {
         assert!(!cfg.is_ignored("cargo"));
     }
 
+    /// The ignore list is only as good as the name it is handed. An aliased
+    /// agent launcher (`claude-personal` = `CLAUDE_CONFIG_DIR=... command
+    /// claude`) reached `is_ignored` as the alias, matched nothing, and the
+    /// plugin registered itself on the pane the agent was already running in.
+    /// Both halves of the fix are pinned here: the hook must hand over the
+    /// alias-expanded line, and `agent_name` must see through the wrapper.
+    #[test]
+    fn an_aliased_agent_launcher_is_ignored_once_the_alias_is_expanded() {
+        let cfg = Config::load(None);
+        let expanded = "CLAUDE_CONFIG_DIR=/Users/x/.claude-personal command claude";
+        assert!(
+            cfg.is_ignored(&crate::command::agent_name(expanded)),
+            "an aliased claude must reach the ignore list as `claude`"
+        );
+    }
+
+    /// zsh hands `preexec` the typed line as `$1` and the alias-expanded,
+    /// single-line form as `$2`. `$1` cannot see through an alias and `$3`,
+    /// though also expanded, may contain newlines — a multi-line function
+    /// definition would corrupt the single-line `cmd` file the watcher reads.
+    #[test]
+    fn the_hook_reads_the_alias_expanded_command_line() {
+        let init = include_str!("../shell/init.zsh");
+        assert!(
+            init.contains(r#"local cmd="${2:-$1}""#),
+            "preexec must prefer $2 (alias-expanded, single-line) over the typed $1"
+        );
+    }
+
     #[test]
     fn default_ignore_list_covers_nested_shells() {
         let cfg = Config::load(None);

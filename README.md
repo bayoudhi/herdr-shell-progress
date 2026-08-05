@@ -124,10 +124,22 @@ ignore_extra = ["claude-personal", "terraform", "docker"]
 # ignore = ["vim", "less"]
 ```
 
-Matching is on the **basename of the first word**, exactly. `claude` does not
-match `claude-personal` — so a wrapper script, an alias resolving to a different
-binary, or a renamed build all need their own entry. If a pane shows a long
-"running" label for something that isn't really a shell command, this is why:
+Matching is on the **basename of the program name**, exactly. The command line
+is read after zsh expands aliases, and leading `VAR=value` assignments plus the
+transparent wrappers `command`, `builtin`, `exec`, `env` and `nohup` are looked
+through. So an alias like
+
+```zsh
+alias claude-personal='CLAUDE_CONFIG_DIR=~/.claude-personal command claude'
+```
+
+matches the built-in `claude` entry without any configuration.
+
+A **wrapper script** is different: it is a real program, and the agent it runs
+is invisible from the outside, so it needs its own entry. Same for a renamed
+build. If a pane shows a long "running" label for something that isn't really a
+shell command — or the pane's own agent looks like it has been taken over —
+this is why:
 
 ```bash
 printf 'ignore_extra = ["my-wrapper"]\n' \

@@ -18,7 +18,13 @@ typeset -g _HSP_PID=0
 mkdir -p "$_HSP_STATE_DIR"
 
 _hsp_preexec() {
-  local cmd="$1"
+  # $2 is the command with aliases expanded, on a single line; $1 is the raw
+  # text typed, which hides `claude-personal='... command claude'` behind the
+  # alias and slips it past the ignore list. $3 is expanded too but keeps the
+  # original newlines, and a multi-line function definition would corrupt the
+  # single-line `cmd` file the watcher reads back. $1 is the fallback because $2
+  # is empty when the history mechanism is off.
+  local cmd="${2:-$1}"
 
   # Safety net only. `precmd` zeroes _HSP_PID as soon as it has signalled the
   # watcher, so this fires just in the odd case where precmd did not run at all.
