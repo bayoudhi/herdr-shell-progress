@@ -1,0 +1,3 @@
+mod label;
+
+fn main() {}
