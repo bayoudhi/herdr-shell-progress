@@ -32,19 +32,52 @@ herdr plugin install bayoudhi/herdr-shell-progress
 That runs `cargo build --release` for you.
 
 Now add the hook to your `.zshrc`. Installed plugins live under a
-content-hashed directory, so ask for the right line rather than guessing it:
+content-hashed directory, so match it with a glob rather than hardcoding a path
+that changes on every update:
 
-```bash
-herdr plugin action invoke bayoudhi.shell-progress.print-snippet
+```zsh
+# herdr-shell-progress
+() {
+  local f=(~/.config/herdr/plugins/github/bayoudhi.shell-progress-*/shell/init.zsh(Nom))
+  (( $#f )) && source $f[1]
+}
 ```
 
-It prints a `source ...` line for your machine. Append that to `~/.zshrc`.
+Append that to `~/.zshrc` verbatim. It uses zsh glob qualifiers rather than a
+subshell, so it costs no fork: `N` makes a missing match empty instead of an
+error, and `om` orders newest-first so it keeps working after an update leaves
+an older directory behind. If the plugin isn't installed, it does nothing.
 
-Open a new pane, run `sleep 5`, and watch the sidebar.
+Then open a **new** pane — `.zshrc` only runs for new shells — and run
+`sleep 5`.
 
-**The `source` line is required.** Installing the plugin alone does nothing:
-Herdr can run a plugin's own processes, but only your shell can tell it when a
-command starts and stops, so the hooks have to live in your shell.
+**That block is required.** Installing the plugin alone does nothing: Herdr can
+run a plugin's own processes, but only your shell knows when a command starts
+and stops, so the hooks have to live in your shell.
+
+<details>
+<summary>Installed from a clone, or want to check the path by hand?</summary>
+
+For a `plugin link` install, source your clone directly:
+
+```zsh
+source ~/herdr-shell-progress/shell/init.zsh
+```
+
+To see the resolved path for an installed copy:
+
+```bash
+herdr plugin list --json \
+  | python3 -c 'import json,sys;print(next(p["plugin_root"] for p in json.load(sys.stdin)["result"]["plugins"] if p["plugin_id"]=="bayoudhi.shell-progress"))'
+```
+
+There is also a `print-snippet` action, but note that
+`herdr plugin action invoke` returns an invocation record on stdout and sends
+the action's own output to the plugin log — so you would need
+`herdr plugin log list --plugin bayoudhi.shell-progress` to read it. The glob
+above avoids that entirely.
+
+</details>
 
 ### From a clone instead
 

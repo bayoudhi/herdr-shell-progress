@@ -425,6 +425,35 @@ mod tests {
         );
     }
 
+    /// The README's install block hardcodes the plugin id inside a glob. Rename
+    /// the plugin and that glob silently matches nothing — the install
+    /// instructions then appear to succeed while doing absolutely nothing, which
+    /// is exactly how the first published version shipped broken.
+    #[test]
+    fn the_readme_install_glob_matches_the_real_plugin_id() {
+        let readme = include_str!("../README.md");
+        let expected = format!("{PLUGIN_ID}-*/shell/init.zsh");
+        assert!(
+            readme.contains(&expected),
+            "the README's source glob must contain `{expected}`"
+        );
+    }
+
+    /// `herdr plugin action invoke` prints an invocation record on stdout and
+    /// routes the action's own output to the plugin log. The README must not
+    /// tell people to paste what that command "prints".
+    #[test]
+    fn the_readme_does_not_present_action_invoke_as_printing_the_snippet() {
+        let readme = include_str!("../README.md");
+        if let Some(idx) = readme.find("plugin action invoke") {
+            let window = &readme[idx..readme.len().min(idx + 400)];
+            assert!(
+                window.contains("plugin log list"),
+                "wherever action invoke is mentioned, say its output goes to the log"
+            );
+        }
+    }
+
     #[test]
     fn env_value_set_and_nonempty_is_used_verbatim() {
         let dir = resolve_config_dir(Some("/custom/config/dir"), "/Users/whoever");
