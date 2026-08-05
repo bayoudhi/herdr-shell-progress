@@ -108,8 +108,11 @@ impl Machine {
                 },
             ];
         }
+        // Resend the title every tick. Herdr replaces a source's metadata
+        // wholesale on each report_metadata, so omitting it here would clear the
+        // command line from the pane for the rest of the command's run.
         vec![Action::Metadata {
-            title: None,
+            title: Some(self.title.clone()),
             label: Some(("working", self.running_label(elapsed))),
             ttl_ms: None,
             clear: false,
@@ -244,14 +247,18 @@ mod tests {
     }
 
     #[test]
-    fn later_ticks_only_refresh_the_label() {
+    fn later_ticks_resend_the_title_alongside_the_label() {
         let mut m = machine();
         m.on_tick(1_002_000);
         let actions = m.on_tick(1_014_000);
+        // Herdr replaces a source's metadata wholesale on every report_metadata,
+        // so omitting the title here CLEARS it. Verified live: the command line
+        // vanished from the pane for the whole middle of a long command and only
+        // reappeared at completion. The title must be resent on every tick.
         assert_eq!(
             actions,
             vec![Action::Metadata {
-                title: None,
+                title: Some("cargo build".into()),
                 label: Some(("working", "running 14s".into())),
                 ttl_ms: None,
                 clear: false,
