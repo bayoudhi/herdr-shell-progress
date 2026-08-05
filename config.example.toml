@@ -1,0 +1,25 @@
+# Copy to the directory reported by:
+#   herdr plugin config-dir hamza.shell-progress
+# and rename to config.toml. Every key is optional.
+
+threshold_ms  = 2000    # how long before a command counts as "slow"
+tick_ms       = 2000    # elapsed-label refresh interval
+max_title_len = 60      # command line truncation in the title field
+
+# Commands never tracked. Matched on the basename of the first word.
+# Setting this REPLACES the defaults.
+# ignore = ["vim", "nvim", "less", "man", "ssh", "top", "htop",
+#           "claude", "codex", "opencode", "droid"]
+
+# Added to the defaults instead of replacing them.
+ignore_extra = []
+
+[finish]
+success_sticky_ms = 20000   # 0 = clear the instant the command finishes
+failure_sticky    = true    # false = failures clear like successes
+
+[labels]
+running = "running {elapsed}"
+success = "ok · {elapsed}"
+failure = "exit {code} · {elapsed}"
+signal  = "{signal} · {elapsed}"

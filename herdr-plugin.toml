@@ -1,0 +1,15 @@
+id = "hamza.shell-progress"
+name = "Shell Progress"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Shows sidebar progress for slow shell commands, not just agents"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+[[actions]]
+id = "print-snippet"
+title = "Print the zsh setup snippet"
+contexts = ["workspace"]
+command = ["bash", "scripts/print-snippet.sh"]
