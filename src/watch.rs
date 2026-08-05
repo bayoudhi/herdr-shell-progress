@@ -95,6 +95,17 @@ fn read_marker(path: &Path) -> Option<String> {
     Some(agent)
 }
 
+/// The name this watcher writes into the marker and later looks for when
+/// checking whether it still owns the pane.
+///
+/// Both uses go through this one function on purpose. They previously read the
+/// value from two different places, and when the reported agent id became a
+/// constant only one of them followed — leaving the ownership probe hunting for
+/// a name the marker would never contain.
+fn own_agent_id() -> String {
+    proto::AGENT_ID.to_string()
+}
+
 /// True while the marker still names `agent`.
 fn marker_names(path: &Path, agent: &str) -> bool {
     read_trimmed(path).as_deref() == Some(agent)
@@ -332,7 +343,7 @@ pub fn run(args: Args) -> i32 {
     }
 
     let marker = driver.marker_path();
-    let own_agent = agent.clone();
+    let own_agent = own_agent_id();
     let mut machine = Machine::new(cfg, agent, title, args.start_ms);
 
     loop {
@@ -383,6 +394,32 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::sync::{Arc, Mutex};
+
+    /// The linger's ownership probe asks "does the marker still name me?", so
+    /// the name it watches for MUST be the one the marker actually receives.
+    /// These lived in two files and drifted: the marker started carrying the
+    /// constant agent id while the probe still looked for the command basename,
+    /// so the compare was permanently false, every linger reported Superseded on
+    /// its first poll, and the queued `release_agent` was silently dropped —
+    /// leaking the pane reservation on every successful slow command. Nothing
+    /// tied the two values together, so all 95 tests passed regardless.
+    #[test]
+    fn the_linger_probe_watches_the_name_the_marker_actually_receives() {
+        let mut m = Machine::new(Config::default(), "sleep".into(), "sleep 9".into(), 0);
+        let written = m
+            .on_tick(10_000)
+            .into_iter()
+            .find_map(|a| match a {
+                Action::MarkerWrite { agent } => Some(agent),
+                _ => None,
+            })
+            .expect("crossing the threshold writes a marker");
+        assert_eq!(
+            written,
+            own_agent_id(),
+            "the marker's contents and the linger probe must agree"
+        );
+    }
 
     #[test]
     fn env_value_set_and_nonempty_is_used_verbatim() {
