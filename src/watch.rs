@@ -95,13 +95,17 @@ fn read_marker(path: &Path) -> Option<String> {
     Some(agent)
 }
 
-/// The name this watcher writes into the marker and later looks for when
-/// checking whether it still owns the pane.
+/// The name the ownership probe looks for when checking whether this watcher
+/// still owns the pane.
 ///
-/// Both uses go through this one function on purpose. They previously read the
-/// value from two different places, and when the reported agent id became a
-/// constant only one of them followed — leaving the ownership probe hunting for
-/// a name the marker would never contain.
+/// This must equal whatever `Action::MarkerWrite` puts in the marker. The two
+/// live in different files — the writer is `state.rs`, which uses
+/// `proto::AGENT_ID` directly — and they have drifted apart once already: when
+/// the reported agent id became a constant, only the writer followed, leaving
+/// this probe hunting for a name the marker would never contain, permanently
+/// false. The shared constant is what keeps them equal; the test
+/// `the_linger_probe_watches_the_name_the_marker_actually_receives` is what
+/// notices if that ever stops being true.
 fn own_agent_id() -> String {
     proto::AGENT_ID.to_string()
 }
