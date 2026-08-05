@@ -425,6 +425,25 @@ mod tests {
         );
     }
 
+    /// Two manifests carry a version: Cargo's and Herdr's. Herdr shows its own
+    /// in `plugin list`, so if they drift, a user reporting a bug names a
+    /// version that does not correspond to the code they are running.
+    #[test]
+    fn the_cargo_and_plugin_manifest_versions_agree() {
+        fn version_of(manifest: &str) -> &str {
+            manifest
+                .lines()
+                .find_map(|l| l.strip_prefix("version = "))
+                .expect("a version field")
+                .trim_matches('"')
+        }
+        assert_eq!(
+            version_of(include_str!("../Cargo.toml")),
+            version_of(include_str!("../herdr-plugin.toml")),
+            "Cargo.toml and herdr-plugin.toml must declare the same version"
+        );
+    }
+
     /// The README's install block hardcodes the plugin id inside a glob. Rename
     /// the plugin and that glob silently matches nothing — the install
     /// instructions then appear to succeed while doing absolutely nothing, which
