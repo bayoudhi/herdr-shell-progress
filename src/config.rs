@@ -264,6 +264,43 @@ mod tests {
         );
     }
 
+    /// The README's `Defaults:` line is prose, so it drifts silently. It listed
+    /// nothing at all until a user asked for a feature (`ignore_extra`) that had
+    /// existed and been tested from the first release — they simply had no way
+    /// to discover it. Pin the list so the next entry added to `default_ignore`
+    /// cannot quietly go undocumented.
+    #[test]
+    fn the_readme_documents_the_real_default_ignore_list() {
+        let readme = include_str!("../README.md");
+        let start = readme.find("Defaults: ").expect("a Defaults: line in the README");
+        let rest = &readme[start..];
+        let end = rest.find('.').expect("the line ends in a period");
+        let documented: Vec<String> = rest[..end]
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect();
+
+        let mut documented_sorted = documented.clone();
+        let mut actual_sorted = default_ignore();
+        documented_sorted.sort();
+        actual_sorted.sort();
+        assert_eq!(
+            documented_sorted, actual_sorted,
+            "the README's Defaults: line must list exactly default_ignore()"
+        );
+    }
+
+    #[test]
+    fn the_readme_explains_that_ignore_extra_adds_rather_than_replaces() {
+        let readme = include_str!("../README.md");
+        assert!(
+            readme.contains("ignore_extra"),
+            "ignore_extra is undiscoverable unless the README names it"
+        );
+    }
+
     #[test]
     fn zero_intervals_are_clamped_to_the_floor() {
         let dir = tempfile::tempdir().unwrap();

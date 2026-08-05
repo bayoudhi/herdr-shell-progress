@@ -68,9 +68,38 @@ herdr plugin config-dir bayoudhi.shell-progress
 Copy `config.example.toml` into that directory as `config.toml`. Every key is
 optional. Changes take effect on your next command — no reload, no restart.
 
-The default `ignore` list includes agent CLIs (`claude`, `codex`, ...). Keep
-them: without them this plugin and Herdr's real agent integrations would both
-try to own the same pane's state.
+### Ignoring commands
+
+Some commands should never be reported: interactive programs that legitimately
+run for hours, and above all coding-agent CLIs. If this plugin reports on a pane
+running an agent, it and Herdr's own integration both try to own that pane's
+state, and yours wins — hiding what the pane actually is.
+
+Two keys control this, and the difference matters:
+
+```toml
+# ADDS to the defaults. This is almost certainly the one you want.
+ignore_extra = ["claude-personal", "terraform", "docker"]
+
+# REPLACES the defaults entirely. Setting this drops every built-in entry,
+# including the agent CLIs, unless you list them again yourself.
+# ignore = ["vim", "less"]
+```
+
+Matching is on the **basename of the first word**, exactly. `claude` does not
+match `claude-personal` — so a wrapper script, an alias resolving to a different
+binary, or a renamed build all need their own entry. If a pane shows a long
+"running" label for something that isn't really a shell command, this is why:
+
+```bash
+printf 'ignore_extra = ["my-wrapper"]\n' \
+  >> "$(herdr plugin config-dir bayoudhi.shell-progress)/config.toml"
+```
+
+It applies on your next command — no reload, no restart.
+
+Defaults: `vim`, `nvim`, `less`, `man`, `ssh`, `top`, `htop`, `zsh`, `bash`,
+`sh`, `fish`, `claude`, `codex`, `opencode`, `droid`.
 
 ## Telling shell entries apart from real agents
 
