@@ -52,7 +52,7 @@ trap 'printf "signal %s\n" "$(cat "$state/exit" 2>/dev/null)" >> "$HSP_TEST_LOG"
   if [ -f "$state/name" ]; then printf 'name %s\n' "$(cat "$state/name")"; fi
 } >> "$HSP_TEST_LOG"
 i=0
-while [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+while [ $i -lt 12 ]; do sleep 0.1; i=$((i + 1)); done
 "#;
 
 /// Long enough that the stub is running before `precmd` signals it, short
@@ -201,6 +201,8 @@ fn run(shell: Shell, commands: &[&str], before: impl FnOnce(&Path)) -> Session {
             stdin.flush().unwrap();
             std::thread::sleep(Duration::from_millis(500));
         }
+        // The session has to be ended from the inside: closing stdin leaves
+        // script(1) waiting on a pty that the lingering stubs still hold open.
         writeln!(stdin, "exit").unwrap();
     }
 
@@ -253,7 +255,7 @@ fn settle(log: &Path) {
         if size != last {
             last = size;
             stable_since = Instant::now();
-        } else if stable_since.elapsed() > Duration::from_millis(400) {
+        } else if stable_since.elapsed() > Duration::from_millis(300) {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -297,13 +299,17 @@ fn parse_log(text: &str) -> Vec<Spawn> {
     out
 }
 
-/// Spawns raised by the commands a test typed, with the `exit` that ends every
-/// session dropped.
+/// Spawns raised by the commands a test typed.
+///
+/// The `exit` that ends every session raises one too, and it races the shell's
+/// teardown: its watcher is sometimes killed before recording anything and
+/// sometimes after, occasionally catching the state files mid-write. Neither
+/// outcome says anything about the hook, so both are dropped.
 fn tracked(session: &Session) -> Vec<&Spawn> {
     session
         .spawns
         .iter()
-        .filter(|s| s.cmd.trim() != "exit")
+        .filter(|s| !s.cmd.trim().is_empty() && s.cmd.trim() != "exit")
         .collect()
 }
 
