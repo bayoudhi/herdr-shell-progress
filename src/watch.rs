@@ -80,6 +80,30 @@ fn read_exit_code(state_dir: &Path) -> Option<i32> {
     read_trimmed(&state_dir.join("exit"))?.parse::<i32>().ok()
 }
 
+/// The name the ignore list matches on, and the identity the marker carries.
+///
+/// zsh hands `preexec` an alias-expanded command line, so parsing `cmd` finds
+/// the program the user would think to ignore. bash cannot offer both halves at
+/// once: `history 1` has the whole pipeline but no alias expansion, while
+/// `$BASH_COMMAND` expands aliases and then stops at the first element of a
+/// pipeline. Its hook writes each to the file that wants it — the line to
+/// `cmd`, which feeds the row and the title, and the program to `name`.
+///
+/// The file is consumed on read. A pane usually runs one shell, but a nested
+/// one inherits `HERDR_PANE_ID` and so shares this state directory: a `name`
+/// left behind by a shell that writes them would be matched against the next
+/// command of a shell that does not.
+fn ignore_name(state_dir: &Path, cmd_line: &str) -> String {
+    let path = state_dir.join("name");
+    if let Some(name) = read_trimmed(&path) {
+        let _ = std::fs::remove_file(&path);
+        if !name.is_empty() {
+            return command::agent_name(&name);
+        }
+    }
+    command::agent_name(cmd_line)
+}
+
 /// The agent name held by the marker, if any.
 ///
 /// A zero-byte marker is removed on sight. It cannot satisfy `clear_actions`
@@ -306,7 +330,7 @@ pub fn run(args: Args) -> i32 {
     let tick_ms = cfg.tick_ms;
 
     let cmd_line = read_trimmed(&args.state_dir.join("cmd")).unwrap_or_default();
-    let agent = command::agent_name(&cmd_line);
+    let agent = ignore_name(&args.state_dir, &cmd_line);
     let title = command::truncate(&cmd_line, cfg.max_title_len);
     let display = command::display_name(&cmd_line, cfg.max_display_len);
 
@@ -853,5 +877,48 @@ mod tests {
             marker.exists(),
             "without this guard the next command's sticky failure could never be cleared"
         );
+    }
+
+    // ---- the ignore name a shell may supply -------------------------------
+
+    #[test]
+    fn the_ignore_name_comes_from_the_command_line_by_default() {
+        let dir = state_dir();
+        assert_eq!(ignore_name(dir.path(), "npm run build | tee log"), "npm");
+    }
+
+    #[test]
+    fn a_shell_written_name_file_wins_over_the_command_line() {
+        let dir = state_dir();
+        std::fs::write(dir.path().join("name"), "claude\n").unwrap();
+        assert_eq!(ignore_name(dir.path(), "cc --resume"), "claude");
+    }
+
+    #[test]
+    fn a_name_file_is_reduced_to_its_basename() {
+        let dir = state_dir();
+        std::fs::write(dir.path().join("name"), "/opt/homebrew/bin/npm").unwrap();
+        assert_eq!(ignore_name(dir.path(), "irrelevant"), "npm");
+    }
+
+    #[test]
+    fn an_empty_name_file_falls_back_to_the_command_line() {
+        let dir = state_dir();
+        std::fs::write(dir.path().join("name"), "   \n").unwrap();
+        assert_eq!(ignore_name(dir.path(), "cargo build"), "cargo");
+    }
+
+    #[test]
+    fn a_name_file_is_consumed_so_it_cannot_go_stale() {
+        let dir = state_dir();
+        let name = dir.path().join("name");
+        std::fs::write(&name, "claude").unwrap();
+
+        assert_eq!(ignore_name(dir.path(), "cargo build"), "claude");
+        assert!(
+            !name.exists(),
+            "a name left behind would rename the next command from a shell that writes none"
+        );
+        assert_eq!(ignore_name(dir.path(), "cargo build"), "cargo");
     }
 }
