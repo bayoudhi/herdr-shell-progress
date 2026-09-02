@@ -7,6 +7,11 @@ use std::path::Path;
 /// A quarter second is faster than anyone can read and still costs nothing.
 pub const MIN_INTERVAL_MS: u64 = 250;
 
+/// Floor for the sidebar row name. `max_display_len = 0` would truncate every
+/// row to nothing, leaving a pane reporting `working` with no name attached to
+/// it. Eight characters is cramped but still identifies a command.
+pub const MIN_DISPLAY_LEN: usize = 8;
+
 fn default_threshold_ms() -> u64 {
     2000
 }
@@ -15,6 +20,11 @@ fn default_tick_ms() -> u64 {
 }
 fn default_max_title_len() -> usize {
     60
+}
+/// Narrower than the title: the sidebar row shares its line with the state
+/// label, while the title gets the pane's own width.
+fn default_max_display_len() -> usize {
+    40
 }
 fn default_success_sticky_ms() -> u64 {
     20_000
@@ -99,6 +109,7 @@ pub struct Config {
     pub threshold_ms: u64,
     pub tick_ms: u64,
     pub max_title_len: usize,
+    pub max_display_len: usize,
     pub ignore: Vec<String>,
     pub ignore_extra: Vec<String>,
     pub finish: Finish,
@@ -111,6 +122,7 @@ impl Default for Config {
             threshold_ms: default_threshold_ms(),
             tick_ms: default_tick_ms(),
             max_title_len: default_max_title_len(),
+            max_display_len: default_max_display_len(),
             ignore: default_ignore(),
             ignore_extra: Vec::new(),
             finish: Finish::default(),
@@ -144,6 +156,7 @@ impl Config {
     fn sanitize(&mut self) {
         self.tick_ms = self.tick_ms.max(MIN_INTERVAL_MS);
         self.threshold_ms = self.threshold_ms.max(MIN_INTERVAL_MS);
+        self.max_display_len = self.max_display_len.max(MIN_DISPLAY_LEN);
     }
 
     pub fn is_ignored(&self, agent: &str) -> bool {
@@ -162,6 +175,24 @@ mod tests {
     fn write_config(dir: &std::path::Path, body: &str) {
         let mut f = std::fs::File::create(dir.join("config.toml")).unwrap();
         f.write_all(body.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn the_display_cap_defaults_to_something_narrower_than_the_title() {
+        let cfg = Config::load(None);
+        assert_eq!(cfg.max_display_len, 40);
+        assert!(
+            cfg.max_display_len < cfg.max_title_len,
+            "the sidebar row is narrower than the title field"
+        );
+    }
+
+    #[test]
+    fn a_zero_display_cap_is_floored_so_the_row_is_never_nameless() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "max_display_len = 0\n");
+        let cfg = Config::load(Some(dir.path()));
+        assert_eq!(cfg.max_display_len, MIN_DISPLAY_LEN);
     }
 
     #[test]
@@ -301,7 +332,9 @@ mod tests {
     #[test]
     fn the_readme_documents_the_real_default_ignore_list() {
         let readme = include_str!("../README.md");
-        let start = readme.find("Defaults: ").expect("a Defaults: line in the README");
+        let start = readme
+            .find("Defaults: ")
+            .expect("a Defaults: line in the README");
         let rest = &readme[start..];
         let end = rest.find('.').expect("the line ends in a period");
         let documented: Vec<String> = rest[..end]
