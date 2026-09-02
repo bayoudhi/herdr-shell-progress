@@ -142,6 +142,17 @@ struct Session {
 /// `before` gets the state directory before the shell starts, for tests that
 /// need a marker in place.
 fn run(shell: Shell, commands: &[&str], before: impl FnOnce(&Path)) -> Session {
+    run_with_prelude(shell, commands, "", before)
+}
+
+/// As `run`, but sources `prelude` ahead of the hook. Used to put another
+/// DEBUG-trap owner in place first.
+fn run_with_prelude(
+    shell: Shell,
+    commands: &[&str],
+    prelude: &str,
+    before: impl FnOnce(&Path),
+) -> Session {
     // A test that panicked while holding the lock has nothing to corrupt here:
     // every session owns a fresh temporary directory.
     let _guard = SESSION.lock().unwrap_or_else(|e| e.into_inner());
@@ -158,6 +169,7 @@ fn run(shell: Shell, commands: &[&str], before: impl FnOnce(&Path)) -> Session {
     let home = tempfile::tempdir().unwrap();
     let log = home.path().join("log");
     std::fs::write(&log, "").unwrap();
+    let ready = home.path().join("hsp-ready");
 
     let stub = home.path().join("stub");
     std::fs::write(&stub, STUB).unwrap();
@@ -172,7 +184,7 @@ fn run(shell: Shell, commands: &[&str], before: impl FnOnce(&Path)) -> Session {
     before(&state_dir);
 
     // zsh finds its rc through ZDOTDIR, bash through --rcfile, fish through -C.
-    let rc = format!("source {}\n", init.display());
+    let rc = format!("{prelude}\nsource {}\n", init.display());
     std::fs::write(home.path().join(".zshrc"), &rc).unwrap();
     std::fs::write(home.path().join("bashrc"), &rc).unwrap();
 
@@ -184,6 +196,7 @@ fn run(shell: Shell, commands: &[&str], before: impl FnOnce(&Path)) -> Session {
         .env("HERDR_PLUGIN_STATE_DIR", &state_root)
         .env("HSP_BIN", &stub)
         .env("HSP_TEST_LOG", &log)
+        .env("HSP_READY", &ready)
         .env("PS1", "")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -193,13 +206,26 @@ fn run(shell: Shell, commands: &[&str], before: impl FnOnce(&Path)) -> Session {
 
     {
         // A shell flushes its input queue when it takes over the terminal, so
-        // anything typed before the first prompt is drawn is simply lost.
+        // anything typed before the first prompt is drawn is simply lost. Wait
+        // for proof that it is running commands rather than guessing at how
+        // long it takes to start: under a loaded machine any guess is wrong.
         let mut stdin = child.stdin.take().unwrap();
-        std::thread::sleep(Duration::from_millis(700));
+        writeln!(stdin, "touch $HSP_READY").unwrap();
+        stdin.flush().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "{} never reached a prompt",
+                shell.binary()
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
         for c in commands {
             writeln!(stdin, "{c}").unwrap();
             stdin.flush().unwrap();
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(400));
         }
         // The session has to be ended from the inside: closing stdin leaves
         // script(1) waiting on a pty that the lingering stubs still hold open.
@@ -301,15 +327,19 @@ fn parse_log(text: &str) -> Vec<Spawn> {
 
 /// Spawns raised by the commands a test typed.
 ///
-/// The `exit` that ends every session raises one too, and it races the shell's
+/// Three kinds of spawn are not among them. The readiness probe is the
+/// harness's own. The `exit` that ends every session races the shell's
 /// teardown: its watcher is sometimes killed before recording anything and
-/// sometimes after, occasionally catching the state files mid-write. Neither
-/// outcome says anything about the hook, so both are dropped.
+/// sometimes after, occasionally catching the state files mid-write. And an
+/// empty `cmd` is that same teardown race caught mid-write.
 fn tracked(session: &Session) -> Vec<&Spawn> {
     session
         .spawns
         .iter()
-        .filter(|s| !s.cmd.trim().is_empty() && s.cmd.trim() != "exit")
+        .filter(|s| {
+            let cmd = s.cmd.trim();
+            !cmd.is_empty() && cmd != "exit" && !cmd.contains("HSP_READY")
+        })
         .collect()
 }
 
@@ -480,7 +510,7 @@ mod bash {
     /// bash is the only shell that writes a `name`: it cannot get the whole
     /// pipeline and the alias-expanded program out of the same source.
     #[test]
-    fn names_the_leading_program_alongside_the_command_line() {
+    fn names_the_expanded_leading_command_alongside_the_command_line() {
         if skip_unless_installed(Shell::Bash) {
             return;
         }
@@ -501,8 +531,89 @@ mod bash {
         );
         assert_eq!(
             piped.name.as_deref(),
-            Some("sleep"),
-            "the ignore list matches the program behind the alias: {piped:#?}"
+            Some("sleep 0.3"),
+            "the whole expanded command is handed over, for the watcher to \
+             reduce the same way it reduces a command line: {piped:#?}"
+        );
+    }
+}
+
+/// A stand-in for bash-preexec, following the contract the real one documents:
+/// it owns the DEBUG trap, hands `preexec_functions` the whole command line,
+/// and restores `$?` before running `precmd_functions`.
+const BASH_PREEXEC_SHIM: &str = r#"
+preexec_functions=()
+precmd_functions=()
+__bp_armed=0
+__bp_set_ret_value() { return ${1:-0}; }
+__bp_debug() {
+  [[ "$__bp_armed" == 1 ]] || return 0
+  __bp_armed=0
+  local line
+  line="$(HISTTIMEFORMAT= history 1)"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line#* }"
+  line="${line#"${line%%[![:space:]]*}"}"
+  local f
+  for f in "${preexec_functions[@]}"; do "$f" "$line"; done
+}
+__bp_precmd() {
+  local ret=$?
+  local f
+  for f in "${precmd_functions[@]}"; do
+    __bp_set_ret_value "$ret"
+    "$f"
+  done
+  __bp_armed=1
+}
+trap '__bp_debug' DEBUG
+PROMPT_COMMAND='__bp_precmd'
+"#;
+
+mod bash_preexec {
+    use super::*;
+
+    /// Atuin and iTerm2's shell integration both load bash-preexec, and it owns
+    /// the DEBUG trap. Installing a second one would start two watchers for
+    /// every command.
+    #[test]
+    fn hooks_into_bash_preexec_rather_than_taking_its_debug_trap() {
+        if skip_unless_installed(Shell::Bash) {
+            return;
+        }
+        let session = run_with_prelude(
+            Shell::Bash,
+            &[SLOW, &format!("{SLOW} | true")],
+            BASH_PREEXEC_SHIM,
+            |_| {},
+        );
+        let spawns = tracked(&session);
+
+        assert_eq!(
+            spawns.len(),
+            2,
+            "one watcher per command line, not one per DEBUG trap: {spawns:#?}"
+        );
+    }
+
+    #[test]
+    fn still_reports_the_exit_code_through_bash_preexec() {
+        if skip_unless_installed(Shell::Bash) {
+            return;
+        }
+        let session = run_with_prelude(
+            Shell::Bash,
+            &[&format!("{SLOW}; false")],
+            BASH_PREEXEC_SHIM,
+            |_| {},
+        );
+        let spawns = tracked(&session);
+
+        assert_eq!(spawns.len(), 1, "{spawns:#?}");
+        assert_eq!(
+            spawns[0].exit.as_deref(),
+            Some("1"),
+            "bash-preexec restores $? for precmd functions: {spawns:#?}"
         );
     }
 }

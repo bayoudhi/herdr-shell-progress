@@ -894,6 +894,16 @@ mod tests {
         assert_eq!(ignore_name(dir.path(), "cc --resume"), "claude");
     }
 
+    /// The hook hands over a whole command rather than a guess at its head, so
+    /// that `VAR=value` assignments and transparent wrappers are skipped here,
+    /// by the parser that already knows how.
+    #[test]
+    fn a_name_file_is_reduced_to_the_program_it_names() {
+        let dir = state_dir();
+        std::fs::write(dir.path().join("name"), "env FOO=1 npm run build").unwrap();
+        assert_eq!(ignore_name(dir.path(), "irrelevant"), "npm");
+    }
+
     #[test]
     fn a_name_file_is_reduced_to_its_basename() {
         let dir = state_dir();
