@@ -166,13 +166,18 @@ shows the actual command — the line as you typed it, so `npm run start` rather
 than a bare `npm` — sent as `display_agent`, which Herdr renders in preference
 to the id.
 
-Row names are cut at `max_display_len` (40 characters by default) with an `…`
+Row names are cut at `max_display_len` (24 characters by default) with an `…`
 marking the cut, and runs of whitespace are collapsed so the row stays tight.
 Raise or lower it in `config.toml`:
 
 ```toml
-max_display_len = 24
+max_display_len = 32
 ```
+
+Keep it under Herdr's own `ui.sidebar_max_width`, which defaults to 36 columns.
+The row spends columns on the state icon and the elapsed label too, so a wider
+cap does not widen the name — Herdr truncates it again, and the elapsed label is
+what gets squeezed out.
 
 The ignore list is unaffected by any of this: it still matches on the program
 name alone, as does the `{agent}` label variable.

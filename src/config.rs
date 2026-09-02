@@ -21,10 +21,12 @@ fn default_tick_ms() -> u64 {
 fn default_max_title_len() -> usize {
     60
 }
-/// Narrower than the title: the sidebar row shares its line with the state
-/// label, while the title gets the pane's own width.
+/// Narrower than the title, and narrower still than Herdr's own
+/// `sidebar_max_width` (36 columns by default): the row spends columns on the
+/// state icon and the elapsed label, so a cap at or above that ceiling never
+/// binds — Herdr re-truncates the name and the elapsed label is what loses.
 fn default_max_display_len() -> usize {
-    40
+    24
 }
 fn default_success_sticky_ms() -> u64 {
     20_000
@@ -178,9 +180,18 @@ mod tests {
     }
 
     #[test]
-    fn the_display_cap_defaults_to_something_narrower_than_the_title() {
+    fn the_display_cap_defaults_to_something_the_sidebar_can_actually_show() {
+        // Herdr's own `sidebar_max_width` defaults to 36 columns, and the row
+        // spends some of those on the state icon and the elapsed label. A cap
+        // above that ceiling never binds: Herdr re-truncates what we already
+        // truncated, and the elapsed label is what gets squeezed out.
+        const HERDR_SIDEBAR_MAX_WIDTH: usize = 36;
         let cfg = Config::load(None);
-        assert_eq!(cfg.max_display_len, 40);
+        assert_eq!(cfg.max_display_len, 24);
+        assert!(
+            cfg.max_display_len < HERDR_SIDEBAR_MAX_WIDTH,
+            "a row name wider than the sidebar is cut by Herdr, not by us"
+        );
         assert!(
             cfg.max_display_len < cfg.max_title_len,
             "the sidebar row is narrower than the title field"
