@@ -9,7 +9,8 @@ elapsed label, and leave a result behind when they finish.
 ![demo](demo/demo.gif)
 
 *`ls` leaves no trace; `sleep 6` crosses the threshold and appears in the
-sidebar as `sleep · running 4s`.*
+sidebar as `sleep 6 · running 4s`. (The recording predates the row carrying the
+whole command line, so it shows `sleep` where you now see `sleep 6`.)*
 
 - Fast commands are invisible — nothing flickers when you run `ls`.
 - Failures stick until your next command, so you see what broke while away.
@@ -161,8 +162,20 @@ What the plugin does do is report a **constant agent id**, `shell`, for every
 command. Without that, each distinct command would mint its own agent identity
 and your list would fill up with `cargo`, `sleep`, `make`, and every other
 binary you ever ran. One id keeps it to a single kind of entry. The row still
-shows the actual command name, sent as `display_agent`, which Herdr renders in
-preference to the id.
+shows the actual command — the line as you typed it, so `npm run start` rather
+than a bare `npm` — sent as `display_agent`, which Herdr renders in preference
+to the id.
+
+Row names are cut at `max_display_len` (40 characters by default) with an `…`
+marking the cut, and runs of whitespace are collapsed so the row stays tight.
+Raise or lower it in `config.toml`:
+
+```toml
+max_display_len = 24
+```
+
+The ignore list is unaffected by any of this: it still matches on the program
+name alone, as does the `{agent}` label variable.
 
 **These entries cannot be restyled.** Herdr's `rows_by_agent` table is validated
 against its own canonical agent ids (`claude`, `codex`, `gemini`, and so on) and
@@ -184,7 +197,7 @@ rows = [["state_icon", "workspace", "tab"], ["agent"]]
 ```
 
 There is no `state_text` in there, so out of the box you get the spinner and the
-command name but **not** the `running 4s` label — the plugin reports it, and
+command line but **not** the `running 4s` label — the plugin reports it, and
 nothing displays it. To see what the demo above shows, add `state_text` to the
 second row in your Herdr `config.toml`:
 

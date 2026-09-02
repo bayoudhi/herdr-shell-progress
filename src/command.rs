@@ -31,6 +31,24 @@ pub fn agent_name(cmd_line: &str) -> String {
     FALLBACK.to_string()
 }
 
+/// The name the sidebar row shows: the command line as typed, with runs of
+/// whitespace collapsed so the row stays tight, cut to `max` characters.
+///
+/// Deliberately not `agent_name`: a row reading `npm` tells you nothing that
+/// `npm run start` does not tell you better. The basename stripping and wrapper
+/// skipping stay in `agent_name`, which still feeds the ignore list and the
+/// `{agent}` template variable.
+///
+/// Collapsing whitespace is cosmetic and can visibly alter a quoted argument
+/// (`echo "a   b"`). The row is a name, not a transcript.
+pub fn display_name(cmd_line: &str, max: usize) -> String {
+    let collapsed = cmd_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return FALLBACK.to_string();
+    }
+    truncate(&collapsed, max)
+}
+
 /// Shortens a string to `max` characters, marking the cut with an ellipsis.
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -114,6 +132,43 @@ mod tests {
     #[test]
     fn a_wrapper_named_after_a_path_is_still_seen_through() {
         assert_eq!(agent_name("/usr/bin/env claude"), "claude");
+    }
+
+    #[test]
+    fn display_name_keeps_the_whole_command_line() {
+        assert_eq!(
+            display_name("cargo build --release", 60),
+            "cargo build --release"
+        );
+    }
+
+    #[test]
+    fn display_name_collapses_runs_of_whitespace() {
+        assert_eq!(display_name("sleep    6", 60), "sleep 6");
+        assert_eq!(display_name("  npm\trun start  ", 60), "npm run start");
+    }
+
+    #[test]
+    fn display_name_truncates_to_the_cap() {
+        assert_eq!(
+            display_name("git push origin main --force", 12),
+            "git push or\u{2026}"
+        );
+    }
+
+    #[test]
+    fn display_name_falls_back_when_there_is_no_command() {
+        assert_eq!(display_name("", 60), "shell");
+        assert_eq!(display_name("   ", 60), "shell");
+    }
+
+    #[test]
+    fn display_name_leaves_a_typed_path_alone() {
+        // Unlike `agent_name`, the row shows what the user actually typed.
+        assert_eq!(
+            display_name("/usr/local/bin/npm test", 60),
+            "/usr/local/bin/npm test"
+        );
     }
 
     #[test]

@@ -2,9 +2,15 @@
 #   herdr plugin config-dir bayoudhi.shell-progress
 # and rename to config.toml. Every key is optional.
 
-threshold_ms  = 2000    # how long before a command counts as "slow" (floor 250)
-tick_ms       = 2000    # elapsed-label refresh interval (floor 250)
-max_title_len = 60      # command line truncation in the title field
+threshold_ms    = 2000  # how long before a command counts as "slow" (floor 250)
+tick_ms         = 2000  # elapsed-label refresh interval (floor 250)
+max_title_len   = 60    # command line truncation in the title field
+max_display_len = 40    # command line truncation in the sidebar row name (floor 8)
+
+# The sidebar row shows the command line as typed — `npm run start`, not `npm` —
+# with runs of whitespace collapsed and the tail cut at max_display_len. It is
+# narrower than max_title_len because the row shares its line with the state
+# label. A value below 8 is clamped up, so a row can never end up nameless.
 
 # threshold_ms and tick_ms are clamped up to 250 ms. Below that the elapsed
 # ticker would connect to the socket hundreds of times a second for the whole

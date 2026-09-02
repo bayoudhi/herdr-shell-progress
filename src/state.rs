@@ -39,18 +39,22 @@ pub enum Action {
 
 pub struct Machine {
     cfg: Config,
+    /// Program name only. Feeds the ignore list and the `{agent}` template
+    /// variable; the sidebar row shows `display` instead.
     agent: String,
     title: String,
+    display: String,
     start_ms: u64,
     reported: bool,
 }
 
 impl Machine {
-    pub fn new(cfg: Config, agent: String, title: String, start_ms: u64) -> Self {
+    pub fn new(cfg: Config, agent: String, title: String, display: String, start_ms: u64) -> Self {
         Self {
             cfg,
             agent,
             title,
+            display,
             start_ms,
             reported: false,
         }
@@ -115,7 +119,7 @@ impl Machine {
                     label: Some(("working", self.running_label(elapsed))),
                     ttl_ms: None,
                     clear: false,
-                    display_agent: Some(self.agent.clone()),
+                    display_agent: Some(self.display.clone()),
                 },
             ];
         }
@@ -127,7 +131,7 @@ impl Machine {
             label: Some(("working", self.running_label(elapsed))),
             ttl_ms: None,
             clear: false,
-            display_agent: Some(self.agent.clone()),
+            display_agent: Some(self.display.clone()),
         }]
     }
 
@@ -158,7 +162,7 @@ impl Machine {
                     label: Some(("idle", text)),
                     ttl_ms: None,
                     clear: false,
-                    display_agent: Some(self.agent.clone()),
+                    display_agent: Some(self.display.clone()),
                 },
                 Action::Exit,
             ];
@@ -189,7 +193,7 @@ impl Machine {
                 label: Some(("idle", text)),
                 ttl_ms: Some(ttl),
                 clear: false,
-                display_agent: Some(self.agent.clone()),
+                display_agent: Some(self.display.clone()),
             },
             // TTL expires title and state_labels but not agent/agent_status, so
             // we must outlive the window to release explicitly. Linger uses the
@@ -253,8 +257,40 @@ mod tests {
             Config::default(),
             "cargo".into(),
             "cargo build".into(),
+            "cargo build".into(),
             1_000_000,
         )
+    }
+
+    #[test]
+    fn the_row_name_is_the_command_line_while_the_agent_var_stays_the_program() {
+        // The sidebar row reads `npm run start`, not `npm`; templates asking for
+        // `{agent}` still get the program name the ignore list matches on.
+        let mut cfg = Config::default();
+        cfg.labels.running = "{agent} · {elapsed}".into();
+        let mut m = Machine::new(
+            cfg,
+            "npm".into(),
+            "npm run start".into(),
+            "npm run start".into(),
+            1_000_000,
+        );
+
+        let meta = m
+            .on_tick(1_002_000)
+            .into_iter()
+            .find_map(|act| match act {
+                Action::Metadata {
+                    display_agent,
+                    label,
+                    ..
+                } => Some((display_agent, label)),
+                _ => None,
+            })
+            .expect("crossing the threshold reports metadata");
+
+        assert_eq!(meta.0, Some("npm run start".to_string()));
+        assert_eq!(meta.1, Some(("working", "npm · 2s".to_string())));
     }
 
     #[test]
@@ -287,7 +323,7 @@ mod tests {
                     label: Some(("working", "running 2s".into())),
                     ttl_ms: None,
                     clear: false,
-                    display_agent: Some("cargo".into()),
+                    display_agent: Some("cargo build".into()),
                 },
             ]
         );
@@ -302,11 +338,13 @@ mod tests {
             Config::default(),
             "cargo".into(),
             "cargo build".into(),
+            "cargo build".into(),
             1_000_000,
         );
         let mut b = Machine::new(
             Config::default(),
             "make".into(),
+            "make all".into(),
             "make all".into(),
             1_000_000,
         );
@@ -331,7 +369,10 @@ mod tests {
             .collect();
         assert_eq!(
             shown,
-            vec![Some("cargo".to_string()), Some("make".to_string())]
+            vec![
+                Some("cargo build".to_string()),
+                Some("make all".to_string())
+            ]
         );
     }
 
@@ -351,7 +392,7 @@ mod tests {
                 label: Some(("working", "running 14s".into())),
                 ttl_ms: None,
                 clear: false,
-                display_agent: Some("cargo".into()),
+                display_agent: Some("cargo build".into()),
             }]
         );
     }
@@ -374,7 +415,7 @@ mod tests {
                     label: Some(("idle", "exit 1 · 4m12s".into())),
                     ttl_ms: None,
                     clear: false,
-                    display_agent: Some("cargo".into()),
+                    display_agent: Some("cargo build".into()),
                 },
                 Action::Exit,
             ]
@@ -405,7 +446,7 @@ mod tests {
                     label: Some(("idle", "ok · 4m12s".into())),
                     ttl_ms: Some(20_000),
                     clear: false,
-                    display_agent: Some("cargo".into()),
+                    display_agent: Some("cargo build".into()),
                 },
                 Action::Linger { ms: 20_000 },
                 Action::Release {
@@ -423,7 +464,13 @@ mod tests {
     fn zero_sticky_success_releases_immediately() {
         let mut cfg = Config::default();
         cfg.finish.success_sticky_ms = 0;
-        let mut m = Machine::new(cfg, "cargo".into(), "cargo build".into(), 1_000_000);
+        let mut m = Machine::new(
+            cfg,
+            "cargo".into(),
+            "cargo build".into(),
+            "cargo build".into(),
+            1_000_000,
+        );
         m.on_tick(1_002_000);
         let actions = m.on_finish(1_010_000, Some(0));
         assert_eq!(
@@ -452,7 +499,7 @@ mod tests {
                 label: Some(("idle", "SIGINT · 12s".into())),
                 ttl_ms: Some(20_000),
                 clear: false,
-                display_agent: Some("cargo".into()),
+                display_agent: Some("cargo build".into()),
             },
             "a deliberate cancel auto-clears rather than nagging like a failure"
         );
@@ -462,7 +509,13 @@ mod tests {
     fn failure_sticky_disabled_makes_failures_auto_clear() {
         let mut cfg = Config::default();
         cfg.finish.failure_sticky = false;
-        let mut m = Machine::new(cfg, "cargo".into(), "cargo build".into(), 1_000_000);
+        let mut m = Machine::new(
+            cfg,
+            "cargo".into(),
+            "cargo build".into(),
+            "cargo build".into(),
+            1_000_000,
+        );
         m.on_tick(1_002_000);
         let actions = m.on_finish(1_012_000, Some(1));
         assert!(actions.contains(&Action::MarkerRemove {
@@ -475,7 +528,13 @@ mod tests {
     fn ttl_is_clamped_to_the_protocol_maximum() {
         let mut cfg = Config::default();
         cfg.finish.success_sticky_ms = 999_999_999;
-        let mut m = Machine::new(cfg, "cargo".into(), "cargo build".into(), 1_000_000);
+        let mut m = Machine::new(
+            cfg,
+            "cargo".into(),
+            "cargo build".into(),
+            "cargo build".into(),
+            1_000_000,
+        );
         m.on_tick(1_002_000);
         let actions = m.on_finish(1_012_000, Some(0));
         match &actions[1] {
@@ -488,7 +547,13 @@ mod tests {
     fn linger_uses_the_clamped_ttl_not_the_raw_config() {
         let mut cfg = Config::default();
         cfg.finish.success_sticky_ms = 999_999_999;
-        let mut m = Machine::new(cfg, "cargo".into(), "cargo build".into(), 1_000_000);
+        let mut m = Machine::new(
+            cfg,
+            "cargo".into(),
+            "cargo build".into(),
+            "cargo build".into(),
+            1_000_000,
+        );
         m.on_tick(1_002_000);
         let actions = m.on_finish(1_012_000, Some(0));
         assert!(
@@ -509,7 +574,7 @@ mod tests {
                 label: Some(("idle", "12s".into())),
                 ttl_ms: Some(20_000),
                 clear: false,
-                display_agent: Some("cargo".into()),
+                display_agent: Some("cargo build".into()),
             },
             "an unreadable exit code must not be dressed up as a success"
         );

@@ -300,6 +300,7 @@ pub fn run(args: Args) -> i32 {
     let cmd_line = read_trimmed(&args.state_dir.join("cmd")).unwrap_or_default();
     let agent = command::agent_name(&cmd_line);
     let title = command::truncate(&cmd_line, cfg.max_title_len);
+    let display = command::display_name(&cmd_line, cfg.max_display_len);
 
     let mut driver = Driver {
         pane: args.pane.clone(),
@@ -348,7 +349,7 @@ pub fn run(args: Args) -> i32 {
 
     let marker = driver.marker_path();
     let own_agent = own_agent_id();
-    let mut machine = Machine::new(cfg, agent, title, args.start_ms);
+    let mut machine = Machine::new(cfg, agent, title, display, args.start_ms);
 
     loop {
         let wait = machine.next_wake_ms(now_ms()).max(1);
@@ -409,7 +410,13 @@ mod tests {
     /// tied the two values together, so all 95 tests passed regardless.
     #[test]
     fn the_linger_probe_watches_the_name_the_marker_actually_receives() {
-        let mut m = Machine::new(Config::default(), "sleep".into(), "sleep 9".into(), 0);
+        let mut m = Machine::new(
+            Config::default(),
+            "sleep".into(),
+            "sleep 9".into(),
+            "sleep 9".into(),
+            0,
+        );
         let written = m
             .on_tick(10_000)
             .into_iter()
@@ -434,7 +441,9 @@ mod tests {
     fn the_readme_never_tells_users_to_add_a_rows_by_agent_rule() {
         let readme = include_str!("../README.md");
         for line in readme.lines() {
-            let is_snippet = line.trim_start().starts_with(&format!("{} =", proto::AGENT_ID))
+            let is_snippet = line
+                .trim_start()
+                .starts_with(&format!("{} =", proto::AGENT_ID))
                 || line.contains(&format!("\n{} =", proto::AGENT_ID));
             assert!(
                 !is_snippet,

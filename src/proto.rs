@@ -9,7 +9,7 @@ pub const SOURCE: &str = "shell-progress";
 /// Reporting the command name here would mint a new agent identity per command
 /// (`cargo`, `sleep`, `make`), filling the sidebar's agent list with a separate
 /// kind for every binary the user has ever run. One stable id keeps it to a
-/// single kind of entry, while the command name still reaches the row via
+/// single kind of entry, while the command line still reaches the row via
 /// `display_agent`, which Herdr renders in preference to the id.
 ///
 /// This does NOT enable `[ui.sidebar.agents.rows_by_agent]` styling. That table
@@ -67,13 +67,14 @@ pub fn report_metadata(
     // The sidebar renders `display_agent` in preference to `agent`, verified
     // live. That split is what lets us report a constant agent id — so a single
     // `rows_by_agent` rule can style every shell entry — while the row still
-    // shows the actual command.
+    // shows the actual command line.
     if let Some(display) = display_agent {
         map.insert("display_agent".into(), json!(display));
         let mut tokens = Map::new();
         // `$cmd` in a custom row means the same thing as `{cmd}` in a label
-        // template: the whole command line. `display_agent` already carries the
-        // short name, so a token duplicating it would be worth nothing.
+        // template: the whole command line, cut only by `max_title_len`. The row
+        // name is the same line cut harder, so `$cmd` is what a custom row uses
+        // when it has more width to spend than the default row does.
         tokens.insert(
             "cmd".into(),
             json!(title_text.unwrap_or_else(|| display.to_string())),
@@ -185,18 +186,23 @@ mod tests {
     }
 
     #[test]
-    fn display_agent_is_short_while_the_cmd_token_is_the_whole_command_line() {
+    fn display_agent_and_the_cmd_token_are_capped_independently() {
+        // The row name is cut by `max_display_len`, the title by the longer
+        // `max_title_len`; nothing here re-derives one from the other.
         let v = report_metadata(
             "w1:p2",
-            Some("cargo build --release".to_string()),
+            Some("cargo build --release --features full".to_string()),
             None,
             None,
             false,
-            Some("cargo"),
+            Some("cargo build --release"),
         );
-        assert_eq!(v["display_agent"], "cargo", "the row shows the short name");
         assert_eq!(
-            v["tokens"]["cmd"], "cargo build --release",
+            v["display_agent"], "cargo build --release",
+            "the row shows the command line, cut to the row's own cap"
+        );
+        assert_eq!(
+            v["tokens"]["cmd"], "cargo build --release --features full",
             "$cmd means what {{cmd}} means in a label template: the full command"
         );
     }
