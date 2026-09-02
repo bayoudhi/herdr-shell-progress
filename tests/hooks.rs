@@ -255,7 +255,10 @@ fn pty_command(shell: Shell, home: &Path, init: &Path) -> Command {
     } else {
         // util-linux takes the command as one string: script -qec "<cmd>" /dev/null
         let quoted = std::iter::once(bin.to_string())
-            .chain(args.iter().map(|a| format!("'{}'", a.replace('\'', r"'\''"))))
+            .chain(
+                args.iter()
+                    .map(|a| format!("'{}'", a.replace('\'', r"'\''"))),
+            )
             .collect::<Vec<_>>()
             .join(" ");
         c.arg("-qec").arg(quoted).arg("/dev/null");
@@ -277,7 +280,9 @@ fn settle(log: &Path) {
     let mut last = usize::MAX;
     let mut stable_since = Instant::now();
     while Instant::now() < deadline {
-        let size = std::fs::metadata(log).map(|m| m.len() as usize).unwrap_or(0);
+        let size = std::fs::metadata(log)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
         if size != last {
             last = size;
             stable_since = Instant::now();
@@ -357,11 +362,7 @@ fn one_watcher_per_command_line(shell: Shell) {
     if skip_unless_installed(shell) {
         return;
     }
-    let session = run(
-        shell,
-        &[SLOW, &format!("{SLOW} | true"), SLOW],
-        |_| {},
-    );
+    let session = run(shell, &[SLOW, &format!("{SLOW} | true"), SLOW], |_| {});
     let spawns = tracked(&session);
 
     assert_eq!(
