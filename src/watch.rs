@@ -1,4 +1,4 @@
-use crate::args::Args;
+use crate::args::{Args, Start};
 use crate::command;
 use crate::config::Config;
 use crate::proto;
@@ -294,6 +294,14 @@ fn no_linger() -> impl FnMut(u64) -> Lingered {
 }
 
 pub fn run(args: Args) -> i32 {
+    // Read the clock before anything else: a shell that passed `--start-now`
+    // has no start of its own, so every millisecond spent below would otherwise
+    // be charged to the command rather than to this process.
+    let start_ms = match args.start {
+        Start::At(ms) => ms,
+        Start::Now => now_ms(),
+    };
+
     let cfg = Config::load(config_dir().as_deref());
     let tick_ms = cfg.tick_ms;
 
@@ -349,7 +357,7 @@ pub fn run(args: Args) -> i32 {
 
     let marker = driver.marker_path();
     let own_agent = own_agent_id();
-    let mut machine = Machine::new(cfg, agent, title, display, args.start_ms);
+    let mut machine = Machine::new(cfg, agent, title, display, start_ms);
 
     loop {
         let wait = machine.next_wake_ms(now_ms()).max(1);
