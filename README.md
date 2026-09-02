@@ -22,12 +22,14 @@ whole command line, so it shows `sleep` where you now see `sleep 6`.)*
 ## Requirements
 
 - Herdr >= 0.7.0
-- **zsh** — the hooks are zsh-only (`preexec`/`precmd`). bash and fish are not
-  supported; see [Porting to another shell](#porting-to-another-shell).
+- **zsh, bash >= 3.2, or fish >= 3.1** — each has its own hook file under
+  `shell/`. Any other shell needs a port; see
+  [Porting to another shell](#porting-to-another-shell).
 - **A Rust toolchain** — installation compiles the watcher from source. There
   are no prebuilt binaries.
-- macOS or Linux. Developed and tested on macOS; the Rust and zsh sides are both
-  portable and Linux should work, but it has not been run there. Reports welcome.
+- macOS or Linux. Developed and tested on macOS; the Rust and shell sides are
+  all portable and Linux should work, but it has not been run there. Reports
+  welcome.
 
 ## Install
 
@@ -37,9 +39,12 @@ herdr plugin install bayoudhi/herdr-shell-progress
 
 That runs `cargo build --release` for you.
 
-Now add the hook to your `.zshrc`. Installed plugins live under a
-content-hashed directory, so match it with a glob rather than hardcoding a path
-that changes on every update:
+Now add the hook to your shell's rc file. Installed plugins live under a
+content-hashed directory, so each snippet matches it with a glob and takes the
+newest, rather than hardcoding a path that changes on every update. If the
+plugin isn't installed, they do nothing.
+
+**zsh** — append to `~/.zshrc`:
 
 ```zsh
 # herdr-shell-progress
@@ -49,17 +54,54 @@ that changes on every update:
 }
 ```
 
-Append that to `~/.zshrc` verbatim. It uses zsh glob qualifiers rather than a
-subshell, so it costs no fork: `N` makes a missing match empty instead of an
-error, and `om` orders newest-first so it keeps working after an update leaves
-an older directory behind. If the plugin isn't installed, it does nothing.
+This uses zsh glob qualifiers rather than a subshell, so it costs no fork: `N`
+makes a missing match empty instead of an error, and `om` orders newest-first.
 
-Then open a **new** pane — `.zshrc` only runs for new shells — and run
+**bash** — append to `~/.bashrc`:
+
+```bash
+# herdr-shell-progress
+_hsp_dir=$(ls -td ~/.config/herdr/plugins/github/bayoudhi.shell-progress-*/ 2>/dev/null | head -1)
+[ -r "$_hsp_dir/shell/init.bash" ] && . "$_hsp_dir/shell/init.bash"
+unset _hsp_dir
+```
+
+**fish** — append to `~/.config/fish/config.fish`:
+
+```fish
+# herdr-shell-progress
+for d in (ls -td ~/.config/herdr/plugins/github/bayoudhi.shell-progress-*/ 2>/dev/null)
+    if test -r $d/shell/init.fish
+        source $d/shell/init.fish
+        break
+    end
+end
+```
+
+Then open a **new** pane — an rc file only runs for new shells — and run
 `sleep 5`.
 
 **That block is required.** Installing the plugin alone does nothing: Herdr can
 run a plugin's own processes, but only your shell knows when a command starts
 and stops, so the hooks have to live in your shell.
+
+### bash and bash-preexec
+
+If something already loaded [bash-preexec] — Atuin and iTerm2's shell
+integration both do — the hook registers with it rather than installing a
+second `DEBUG` trap, which would start two watchers per command. Nothing is
+needed from you beyond loading bash-preexec before this snippet.
+
+If some *other* `DEBUG` trap is installed and bash-preexec is not there to
+share it, the hook stays inert rather than breaking whatever owns the trap.
+Loading bash-preexec first makes both work.
+
+One consequence of going through bash-preexec: it hands over the command line
+but not its alias-expanded form, so an aliased command reaches the ignore list
+under the alias rather than the program behind it. See
+[Ignoring commands](#ignoring-commands).
+
+[bash-preexec]: https://github.com/rcaloras/bash-preexec
 
 <details>
 <summary>Installed from a clone, or want to check the path by hand?</summary>
@@ -67,7 +109,7 @@ and stops, so the hooks have to live in your shell.
 For a `plugin link` install, source your clone directly:
 
 ```zsh
-source ~/herdr-shell-progress/shell/init.zsh
+source ~/herdr-shell-progress/shell/init.zsh   # or init.bash, or init.fish
 ```
 
 To see the resolved path for an installed copy:
@@ -92,7 +134,7 @@ git clone https://github.com/bayoudhi/herdr-shell-progress ~/herdr-shell-progres
 cd ~/herdr-shell-progress
 cargo build --release
 herdr plugin link ~/herdr-shell-progress
-echo 'source ~/herdr-shell-progress/shell/init.zsh' >> ~/.zshrc
+echo 'source ~/herdr-shell-progress/shell/init.zsh' >> ~/.zshrc  # init.bash / init.fish
 ```
 
 `herdr plugin link` deliberately does *not* run build commands, so the
@@ -125,8 +167,8 @@ ignore_extra = ["claude-personal", "terraform", "docker"]
 # ignore = ["vim", "less"]
 ```
 
-Matching is on the **basename of the program name**, exactly. The command line
-is read after zsh expands aliases, and leading `VAR=value` assignments plus the
+Matching is on the **basename of the program name**, exactly. The command is
+read after alias expansion, and leading `VAR=value` assignments plus the
 transparent wrappers `command`, `builtin`, `exec`, `env` and `nohup` are looked
 through. So an alias like
 
@@ -135,6 +177,18 @@ alias claude-personal='CLAUDE_CONFIG_DIR=~/.claude-personal command claude'
 ```
 
 matches the built-in `claude` entry without any configuration.
+
+zsh gets the expanded form from `preexec` and bash from `$BASH_COMMAND`. fish
+needs no expansion — its abbreviations are already expanded in the submitted
+line, and its functions carry the name you would think to ignore.
+
+The exception is bash going through [bash-preexec], which hands over the command
+line but not its expanded form. There, an alias reaches the ignore list under
+its own name, so list the alias as well:
+
+```toml
+ignore_extra = ["claude-personal"]
+```
 
 A **wrapper script** is different: it is a real program, and the agent it runs
 is invisible from the outside, so it needs its own entry. Same for a renamed
@@ -220,11 +274,15 @@ all live in `state_text`.
 
 ## How it works
 
-`preexec` spawns a detached watcher, using only zsh builtins so the sole cost is
-one fork per prompt. The watcher sleeps until the threshold; if the command
-finishes first it exits having never touched the socket. Otherwise it reports
-via `pane.report_agent` and ticks `pane.report_metadata`. `precmd` writes the
-exit code and signals the watcher, which posts the final label and exits.
+The pre-command hook spawns a detached watcher. The watcher sleeps until the
+threshold; if the command finishes first it exits having never touched the
+socket. Otherwise it reports via `pane.report_agent` and ticks
+`pane.report_metadata`. The pre-prompt hook writes the exit code and signals the
+watcher, which posts the final label and exits.
+
+Under zsh that costs one fork per prompt — the watcher itself — because
+everything else is a builtin. bash pays a second fork to read `history 1`, and
+fish a second fork for `kill`, which it has no builtin for.
 
 The watcher writes nothing to stdout or stderr — it inherits the pane's tty, so
 any output would corrupt your shell session.
@@ -232,18 +290,27 @@ any output would corrupt your shell session.
 ## Porting to another shell
 
 The Rust watcher is shell-agnostic. Everything shell-specific lives in
-`shell/init.zsh`, which is about 50 lines, and a port needs to do three things:
+`shell/init.zsh`, `shell/init.bash` and `shell/init.fish`, each about 50 to 100
+lines, and a port needs to do three things:
 
 1. On command start: write the command line to `<state-dir>/cmd`, then spawn
    `herdr-shell-progress watch --pane "$HERDR_PANE_ID" --shell-pid <shell pid>
    --start-ms <epoch ms> --state-dir <state-dir>`, detached, with both streams
-   redirected to `/dev/null`. Pass `--clear-first` if `<state-dir>/marker` exists.
+   redirected to `/dev/null`. Pass `--clear-first` if `<state-dir>/marker`
+   exists. A shell with no cheap millisecond clock can pass `--start-now`
+   instead of `--start-ms` and let the watcher read its own.
 2. On command end: write `$?` to `<state-dir>/exit`, then send `SIGUSR1` to the
    watcher.
 3. On shell exit: send `SIGTERM` to the watcher.
 
-bash can do this with `trap DEBUG` plus `PROMPT_COMMAND`, though getting exactly
-one spawn per command out of `trap DEBUG` is the fiddly part. PRs welcome.
+There is one optional fourth: a shell whose pre-command hook cannot see both the
+whole command line and its alias-expanded form — bash is the only one so far —
+can write the expanded leading command to `<state-dir>/name`, and the watcher
+will match the ignore list against that instead of against `cmd`. The file is
+consumed on read.
+
+New hooks belong in `tests/hooks.rs`, which drives each one through a real
+interactive shell on a pty and checks what it spawned. PRs welcome.
 
 ## Uninstall
 
@@ -254,6 +321,6 @@ herdr plugin uninstall bayoudhi.shell-progress
 Use `herdr plugin unlink bayoudhi.shell-progress` instead if you installed from
 a clone with `plugin link`.
 
-Then remove the `source` line from `.zshrc`. That line is what actually runs the
+Then remove the block from your shell's rc file. It is what actually runs the
 plugin, so leaving it behind after uninstalling leaves a dangling `source` that
 your shell will complain about on every new pane.
