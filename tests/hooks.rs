@@ -275,8 +275,16 @@ fn make_executable(path: &Path) {
 
 /// Waits for the stubs to stop writing. They outlive the shell by design, so
 /// the last `signal` line can land after the session has already ended.
+///
+/// The quiet window has to be longer than the longest gap between two writes,
+/// and that gap is a command's own duration: a stub records its spawn on
+/// startup and then says nothing until the command finishes and signals it. A
+/// window at or near `SLOW` calls the log finished while an exit code is still
+/// in flight, which reads as a hook that never reported one.
+const QUIET_WINDOW_MS: u64 = 900;
+
 fn settle(log: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + Duration::from_secs(8);
     let mut last = usize::MAX;
     let mut stable_since = Instant::now();
     while Instant::now() < deadline {
@@ -286,7 +294,7 @@ fn settle(log: &Path) {
         if size != last {
             last = size;
             stable_since = Instant::now();
-        } else if stable_since.elapsed() > Duration::from_millis(300) {
+        } else if stable_since.elapsed() > Duration::from_millis(QUIET_WINDOW_MS) {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
