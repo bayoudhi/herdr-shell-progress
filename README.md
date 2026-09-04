@@ -9,8 +9,7 @@ elapsed label, and leave a result behind when they finish.
 ![demo](demo/demo.gif)
 
 *`ls` leaves no trace; `sleep 6` crosses the threshold and appears in the
-sidebar as `sleep 6 · running 4s`. (The recording predates the row carrying the
-whole command line, so it shows `sleep` where you now see `sleep 6`.)*
+sidebar as `sleep 6 · running 4s`, then settles into `sleep 6 · ok · 6s`.*
 
 - Fast commands are invisible — nothing flickers when you run `ls`.
 - Failures stick until your next command, so you see what broke while away.

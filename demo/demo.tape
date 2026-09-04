@@ -10,7 +10,11 @@
 #   herdr session stop demo && herdr session delete demo
 #
 # The plugin must already be active in your shell — this records the real
-# thing, it does not simulate it.
+# thing, it does not simulate it. The sidebar's elapsed label only shows if
+# your Herdr config has `state_text` in the agents rows:
+#
+#   [ui.sidebar.agents]
+#   rows = [["state_icon", "workspace", "tab"], ["agent", "state_text"]]
 
 Output demo/demo.gif
 
@@ -44,16 +48,18 @@ Type "ls"
 Enter
 Sleep 3s
 
-# A slow command crosses the 2s threshold, then ticks while it runs.
+# A slow command crosses the 2s threshold, then ticks while it runs. The row
+# carries the whole command line, so it reads `sleep 6`, not a bare `sleep`.
 Type "sleep 6"
 Enter
 Sleep 9s
 
-# Its result lands, and clears itself ~20s later.
+# Its result lands as `ok · 6s`, and clears itself ~20s later.
 Sleep 4s
 
-# Tear the demo session down.
+# Tear the demo session down with `prefix+q`. The prefix is ctrl+b out of the
+# box — this line uses ctrl+a, so match it to your own binding.
 Hide
-Ctrl+B
-Type "d"
+Ctrl+A
+Type "q"
 Sleep 2s
