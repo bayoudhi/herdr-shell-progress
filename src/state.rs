@@ -46,6 +46,8 @@ pub struct Machine {
     display: String,
     start_ms: u64,
     reported: bool,
+    /// Set by the watcher's keylock probe; decorates running reports only.
+    locked: bool,
 }
 
 impl Machine {
@@ -57,6 +59,7 @@ impl Machine {
             display,
             start_ms,
             reported: false,
+            locked: false,
         }
     }
 
@@ -98,6 +101,32 @@ impl Machine {
         self.cfg.threshold_ms.saturating_sub(self.elapsed(now_ms))
     }
 
+    /// The watcher calls this before `on_tick` while the tracked program is
+    /// keylock. A session that is not keylock never changes it.
+    #[allow(dead_code)]
+    pub fn set_locked(&mut self, locked: bool) {
+        self.locked = locked;
+    }
+
+    /// The command text as a running report should show it: the lock goes on
+    /// after truncation, so it is never the character that gets cut.
+    fn running_title(&self) -> String {
+        if self.locked {
+            crate::lock::decorate(&self.title, &self.cfg.lock.prefix)
+        } else {
+            self.title.clone()
+        }
+    }
+
+    /// The sidebar row name as a running report should show it.
+    fn running_display(&self) -> String {
+        if self.locked {
+            crate::lock::decorate(&self.display, &self.cfg.lock.prefix)
+        } else {
+            self.display.clone()
+        }
+    }
+
     pub fn on_tick(&mut self, now_ms: u64) -> Vec<Action> {
         let elapsed = self.elapsed(now_ms);
         if !self.reported {
@@ -112,14 +141,14 @@ impl Machine {
                 Action::ReportAgent {
                     state: AgentState::Working,
                     agent: crate::proto::AGENT_ID.to_string(),
-                    message: Some(self.title.clone()),
+                    message: Some(self.running_title()),
                 },
                 Action::Metadata {
-                    title: Some(self.title.clone()),
+                    title: Some(self.running_title()),
                     label: Some(("working", self.running_label(elapsed))),
                     ttl_ms: None,
                     clear: false,
-                    display_agent: Some(self.display.clone()),
+                    display_agent: Some(self.running_display()),
                 },
             ];
         }
@@ -127,11 +156,11 @@ impl Machine {
         // wholesale on each report_metadata, so omitting it here would clear the
         // command line from the pane for the rest of the command's run.
         vec![Action::Metadata {
-            title: Some(self.title.clone()),
+            title: Some(self.running_title()),
             label: Some(("working", self.running_label(elapsed))),
             ttl_ms: None,
             clear: false,
-            display_agent: Some(self.display.clone()),
+            display_agent: Some(self.running_display()),
         }]
     }
 
@@ -708,5 +737,103 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_locked_session_wears_the_lock_on_its_running_row() {
+        let mut m = machine();
+        m.set_locked(true);
+        let actions = m.on_tick(1_002_000);
+        let metadata = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Metadata {
+                    title,
+                    display_agent,
+                    ..
+                } => Some((title.clone(), display_agent.clone())),
+                _ => None,
+            })
+            .expect("a running report carries metadata");
+        assert_eq!(
+            metadata.1.as_deref().map(|d| d.starts_with("🔒 ")),
+            Some(true),
+            "the row name shows the lock: {metadata:?}"
+        );
+        assert_eq!(
+            metadata.0.as_deref().map(|t| t.starts_with("🔒 ")),
+            Some(true),
+            "the title shows the lock too: {metadata:?}"
+        );
+        let message = actions.iter().find_map(|a| match a {
+            Action::ReportAgent { message, .. } => message.clone(),
+            _ => None,
+        });
+        assert_eq!(message.as_deref().map(|m| m.starts_with("🔒 ")), Some(true));
+    }
+
+    #[test]
+    fn unlocking_takes_the_lock_off_the_next_tick() {
+        let mut m = machine();
+        m.set_locked(true);
+        m.on_tick(1_002_000);
+        m.set_locked(false);
+        let actions = m.on_tick(1_004_000);
+        let display = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Metadata { display_agent, .. } => display_agent.clone(),
+                _ => None,
+            })
+            .expect("a running report carries a row name");
+        assert!(!display.starts_with("🔒 "), "{display}");
+    }
+
+    #[test]
+    fn a_finished_session_never_wears_the_lock() {
+        let mut m = machine();
+        m.set_locked(true);
+        m.on_tick(1_002_000);
+        let actions = m.on_finish(1_004_000, Some(0));
+        for action in &actions {
+            if let Action::Metadata {
+                title,
+                display_agent,
+                ..
+            } = action
+            {
+                assert!(
+                    !title.clone().unwrap_or_default().starts_with("🔒 "),
+                    "{action:?}"
+                );
+                assert!(
+                    !display_agent.clone().unwrap_or_default().starts_with("🔒 "),
+                    "{action:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_prefix_never_decorates() {
+        let mut cfg = Config::default();
+        cfg.lock.prefix = String::new();
+        let mut m = Machine::new(
+            cfg,
+            "keylock".to_string(),
+            "keylock run -- ./m.sh".to_string(),
+            "keylock run -- ./m.sh".to_string(),
+            0,
+        );
+        m.set_locked(true);
+        let actions = m.on_tick(10_000);
+        let display = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Metadata { display_agent, .. } => display_agent.clone(),
+                _ => None,
+            })
+            .expect("a running report carries a row name");
+        assert_eq!(display, "keylock run -- ./m.sh");
     }
 }

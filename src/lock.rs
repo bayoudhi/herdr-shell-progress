@@ -31,7 +31,6 @@ pub fn parse_status(stdout: &str) -> Option<bool> {
 }
 
 /// The row name with the lock in front. An empty prefix is the off switch.
-#[allow(dead_code)]
 pub fn decorate(text: &str, prefix: &str) -> String {
     if prefix.is_empty() {
         return text.to_string();
