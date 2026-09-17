@@ -2,10 +2,8 @@
 //! shows in the row. Pure: the watcher does the talking to keylock.
 
 /// keylock's own program name, as `command::agent_name` reports it.
-#[allow(dead_code)]
 const KEYLOCK: &str = "keylock";
 
-#[allow(dead_code)]
 pub fn is_keylock(agent: &str) -> bool {
     agent == KEYLOCK
 }
@@ -16,7 +14,6 @@ pub fn is_keylock(agent: &str) -> bool {
 ///
 /// A pane can hold several sessions (a nested `keylock run`); one locked
 /// session is enough to call the pane locked.
-#[allow(dead_code)]
 pub fn parse_status(stdout: &str) -> Option<bool> {
     let mut seen_unlocked = false;
     for line in stdout.lines() {

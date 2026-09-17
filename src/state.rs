@@ -103,7 +103,6 @@ impl Machine {
 
     /// The watcher calls this before `on_tick` while the tracked program is
     /// keylock. A session that is not keylock never changes it.
-    #[allow(dead_code)]
     pub fn set_locked(&mut self, locked: bool) {
         self.locked = locked;
     }
