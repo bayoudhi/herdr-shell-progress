@@ -2,6 +2,7 @@ mod args;
 mod command;
 mod config;
 mod label;
+mod lock;
 mod proto;
 mod socket;
 mod state;
