@@ -1259,4 +1259,215 @@ mod tests {
         assert!(!probe.poll());
         assert!(!probe.enabled, "one failed spawn, not one per tick");
     }
+
+    // ---- run(): the spec's missing integration test (F3) -------------------
+    //
+    // Nothing else drives `run()` itself, so the wiring lines — building the
+    // probe from the real args, calling `set_locked` before `on_tick` — have no
+    // automated cover. These tests do, against a fake `keylock` on PATH-like
+    // override and a fake Herdr socket, following the `UnixListener` harness
+    // `fake_server` already uses above.
+    //
+    // `run()` reads three process-wide environment variables (`HSP_KEYLOCK_BIN`,
+    // `HERDR_SOCKET_PATH`, `HERDR_PLUGIN_CONFIG_DIR`) and installs a real
+    // process-wide SIGUSR1/SIGTERM handler. This binary's tests run in parallel
+    // threads of one process, so two of these tests running at once would each
+    // stomp the other's environment and each other's signals. Only the tests in
+    // this section touch any of that, so serializing just this section is
+    // enough — no other test sets these variables or sends these signals for
+    // real.
+    static RUN_ENV: Mutex<()> = Mutex::new(());
+
+    /// Stands in for Herdr like `fake_server`, but keeps the whole parsed
+    /// request instead of only its method name, so a test can inspect the
+    /// title/display_agent/tokens a `report_metadata` call actually carried.
+    fn fake_server_capturing(dir: &Path) -> (PathBuf, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let path = dir.join("herdr.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    break;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    sink.lock().unwrap().push(v);
+                }
+                let mut stream = reader.into_inner();
+                let _ = stream.write_all(b"{\"id\":\"1\",\"result\":{\"type\":\"ok\"}}\n");
+            }
+        });
+        (path, log)
+    }
+
+    /// `Start::At` far in the past so the very first `next_wake_ms` already
+    /// reads as past the (default, 2s) threshold — the run loop reports on its
+    /// first pass instead of the test having to wait out a real 2 seconds.
+    fn args_for(pane: &str, state_dir: &Path) -> Args {
+        Args {
+            pane: pane.to_string(),
+            shell_pid: std::process::id() as i32,
+            start: Start::At(now_ms().saturating_sub(5_000)),
+            state_dir: state_dir.to_path_buf(),
+            clear_first: false,
+        }
+    }
+
+    /// Writes the exit code and sends the real `SIGUSR1` `precmd` would send,
+    /// after a pause long enough for `run()`'s first tick (probe spawn plus one
+    /// report) to have already happened — comfortably inside the default 2s
+    /// `tick_ms` wait the loop is otherwise sitting in.
+    fn finish_after(
+        state_dir: &Path,
+        exit_code: &str,
+        delay_ms: u64,
+    ) -> std::thread::JoinHandle<()> {
+        let exit_path = state_dir.join("exit");
+        let code = exit_code.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            std::fs::write(&exit_path, code).unwrap();
+            unsafe {
+                libc::kill(std::process::id() as i32, SIGUSR1);
+            }
+        })
+    }
+
+    #[test]
+    fn run_reports_the_decorated_row_while_a_tracked_keylock_session_is_locked() {
+        let _guard = RUN_ENV.lock().unwrap();
+
+        let sockdir = state_dir();
+        let (socket, payloads) = fake_server_capturing(sockdir.path());
+
+        // success_sticky_ms = 0 skips the idle report and the linger entirely,
+        // so the only report_metadata this run ever sends is the locked,
+        // running one under test.
+        let cfgdir = state_dir();
+        std::fs::write(
+            cfgdir.path().join("config.toml"),
+            "[finish]\nsuccess_sticky_ms = 0\n",
+        )
+        .unwrap();
+
+        let keylockdir = state_dir();
+        let argv_log = keylockdir.path().join("argv");
+        let keylock = fake_keylock(
+            keylockdir.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{}'; echo 'locked pid=1 cmd=./m.sh'",
+                argv_log.display()
+            ),
+        );
+
+        let cmddir = state_dir();
+        std::fs::write(cmddir.path().join("cmd"), "keylock run -- ./m.sh").unwrap();
+
+        std::env::set_var("HSP_KEYLOCK_BIN", &keylock);
+        std::env::set_var("HERDR_SOCKET_PATH", &socket);
+        std::env::set_var("HERDR_PLUGIN_CONFIG_DIR", cfgdir.path());
+
+        let finisher = finish_after(cmddir.path(), "0", 300);
+        let code = run(args_for("w1:p2", cmddir.path()));
+        finisher.join().unwrap();
+
+        std::env::remove_var("HSP_KEYLOCK_BIN");
+        std::env::remove_var("HERDR_SOCKET_PATH");
+        std::env::remove_var("HERDR_PLUGIN_CONFIG_DIR");
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            std::fs::read_to_string(&argv_log).unwrap().trim(),
+            "status --pane w1:p2",
+            "the probe must ask keylock about this run's own pane"
+        );
+
+        let payloads = payloads.lock().unwrap();
+        let metadata = payloads
+            .iter()
+            .find(|v| v["method"] == "pane.report_metadata")
+            .expect("a running report_metadata reached the fake socket");
+        let title = metadata["params"]["title"].as_str().unwrap();
+        let display = metadata["params"]["display_agent"].as_str().unwrap();
+        let cmd_token = metadata["params"]["tokens"]["cmd"].as_str().unwrap();
+        assert!(
+            title.starts_with("🔒 "),
+            "the pane title shows the lock: {title}"
+        );
+        assert!(
+            display.starts_with("🔒 "),
+            "the row name shows the lock: {display}"
+        );
+        assert!(
+            !cmd_token.starts_with("🔒 "),
+            "$cmd must stay undecorated even while locked: {cmd_token}"
+        );
+    }
+
+    #[test]
+    fn run_never_spawns_the_probe_for_a_non_keylock_command() {
+        let _guard = RUN_ENV.lock().unwrap();
+
+        let sockdir = state_dir();
+        let (socket, payloads) = fake_server_capturing(sockdir.path());
+
+        let cfgdir = state_dir();
+        std::fs::write(
+            cfgdir.path().join("config.toml"),
+            "[finish]\nsuccess_sticky_ms = 0\n",
+        )
+        .unwrap();
+
+        let keylockdir = state_dir();
+        let argv_log = keylockdir.path().join("argv");
+        let keylock = fake_keylock(
+            keylockdir.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{}'; echo 'locked pid=1 cmd=x'",
+                argv_log.display()
+            ),
+        );
+
+        let cmddir = state_dir();
+        std::fs::write(cmddir.path().join("cmd"), "cargo build").unwrap();
+
+        std::env::set_var("HSP_KEYLOCK_BIN", &keylock);
+        std::env::set_var("HERDR_SOCKET_PATH", &socket);
+        std::env::set_var("HERDR_PLUGIN_CONFIG_DIR", cfgdir.path());
+
+        let finisher = finish_after(cmddir.path(), "0", 300);
+        let code = run(args_for("w1:p3", cmddir.path()));
+        finisher.join().unwrap();
+
+        std::env::remove_var("HSP_KEYLOCK_BIN");
+        std::env::remove_var("HERDR_SOCKET_PATH");
+        std::env::remove_var("HERDR_PLUGIN_CONFIG_DIR");
+
+        assert_eq!(code, 0);
+        assert!(
+            !argv_log.exists(),
+            "a non-keylock command must never invoke the probe"
+        );
+
+        let payloads = payloads.lock().unwrap();
+        assert!(
+            payloads
+                .iter()
+                .any(|v| v["method"] == "pane.report_metadata"),
+            "an ordinary slow command still gets reported"
+        );
+        assert!(
+            payloads.iter().all(|v| {
+                v["params"]["title"]
+                    .as_str()
+                    .map(|t| !t.starts_with("🔒 "))
+                    .unwrap_or(true)
+            }),
+            "no report may carry the lock prefix for a non-keylock command"
+        );
+    }
 }
