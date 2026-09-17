@@ -192,7 +192,15 @@ impl Config {
         self.tick_ms = self.tick_ms.max(MIN_INTERVAL_MS);
         self.threshold_ms = self.threshold_ms.max(MIN_INTERVAL_MS);
         self.max_display_len = self.max_display_len.max(MIN_DISPLAY_LEN);
-        self.lock.timeout_ms = self.lock.timeout_ms.max(MIN_LOCK_TIMEOUT_MS);
+        // Ceiling is `tick_ms` (already clamped above, and always >=
+        // MIN_INTERVAL_MS > MIN_LOCK_TIMEOUT_MS, so the range is never empty):
+        // a probe timeout longer than the watcher's own wake interval would
+        // block a single tick for as long as the hostile value names, freezing
+        // the elapsed label and delaying the finish label for that long.
+        self.lock.timeout_ms = self
+            .lock
+            .timeout_ms
+            .clamp(MIN_LOCK_TIMEOUT_MS, self.tick_ms);
     }
 
     pub fn is_ignored(&self, agent: &str) -> bool {
@@ -483,6 +491,24 @@ mod tests {
         assert_eq!(
             Config::load(Some(dir.path())).lock.timeout_ms,
             MIN_LOCK_TIMEOUT_MS
+        );
+    }
+
+    /// F2: `sanitize()`'s own doc comment promises hostile values are pulled
+    /// into a survivable range, but only the floor was ever applied. An hour-long
+    /// `timeout_ms` would block the single-threaded watcher for an hour per
+    /// tick, freezing the elapsed label and delaying the finish label — so it
+    /// must never exceed `tick_ms`, the interval the watcher is meant to wake up
+    /// on.
+    #[test]
+    fn an_excessive_lock_timeout_is_clamped_to_tick_ms() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "[lock]\ntimeout_ms = 3600000\n");
+        let cfg = Config::load(Some(dir.path()));
+        assert_eq!(cfg.tick_ms, 2000, "default tick_ms is unaffected");
+        assert_eq!(
+            cfg.lock.timeout_ms, cfg.tick_ms,
+            "an hour-long timeout must not block a single tick for an hour"
         );
     }
 }
