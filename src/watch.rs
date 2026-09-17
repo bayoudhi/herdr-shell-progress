@@ -6,6 +6,7 @@ use crate::socket::{self, SendError};
 use crate::state::{self, Action, Machine};
 use signal_hook::consts::{SIGTERM, SIGUSR1};
 use std::io::Read;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -322,6 +323,50 @@ fn no_linger() -> impl FnMut(u64) -> Lingered {
 /// How often the probe checks on a `keylock status` it is waiting for.
 const LOCK_POLL_MS: u64 = 5;
 
+/// Upper bound on how much of a finished `keylock status`'s stdout the probe
+/// ever reads. A status line is a handful of bytes; this is only a backstop.
+const LOCK_REPLY_CAP: usize = 8 * 1024;
+
+/// Reads whatever is already buffered on `pipe` without blocking.
+///
+/// `keylock status` has already exited by the time this runs, so its own
+/// write end of the pipe is closed — but a pipe only signals EOF once every
+/// write end is closed, and a misbehaving `keylock` could leave a detached
+/// descendant (an auto-started daemon, say) holding stdout open. A plain
+/// `read_to_string` would then block forever, well past `timeout_ms`, and the
+/// watcher would never return to its loop. Putting the fd in non-blocking mode
+/// first means this drains only what is already sitting in the pipe buffer —
+/// exactly what the exited child actually wrote — and returns the moment
+/// nothing more is immediately available.
+fn read_available(pipe: &mut std::process::ChildStdout) -> String {
+    let fd = pipe.as_raw_fd();
+    // SAFETY: `fd` is a valid, open file descriptor for the lifetime of this
+    // call (it is borrowed from `pipe`, which outlives it); `fcntl` with
+    // F_GETFL/F_SETFL on it is an ordinary, side-effect-local syscall.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while buf.len() < LOCK_REPLY_CAP {
+        match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let take = n.min(LOCK_REPLY_CAP - buf.len());
+                buf.extend_from_slice(&chunk[..take]);
+            }
+            // Nothing more is buffered right now — that's the point of going
+            // non-blocking, not an error.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// `keylock` to run, overridable with `HSP_KEYLOCK_BIN`.
 fn keylock_bin() -> std::ffi::OsString {
     std::env::var_os("HSP_KEYLOCK_BIN")
@@ -391,10 +436,10 @@ impl LockProbe {
                     if !status.success() {
                         return self.locked;
                     }
-                    let mut stdout = String::new();
-                    if let Some(mut pipe) = child.stdout.take() {
-                        let _ = pipe.read_to_string(&mut stdout);
-                    }
+                    let stdout = match child.stdout.take() {
+                        Some(mut pipe) => read_available(&mut pipe),
+                        None => String::new(),
+                    };
                     if let Some(locked) = crate::lock::parse_status(&stdout) {
                         self.locked = locked;
                     }
@@ -406,7 +451,11 @@ impl LockProbe {
                     return self.locked;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(LOCK_POLL_MS)),
-                Err(_) => return self.locked,
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return self.locked;
+                }
             }
         }
     }
@@ -1126,16 +1175,69 @@ mod tests {
         assert!(probe.poll(), "a failed check keeps the last known state");
     }
 
+    /// Exit 0 with output `parse_status` cannot read — usage text from a
+    /// keylock older than 0.2.0 is exactly this shape — is the third fallback
+    /// the spec names: it must not be read as unlocked, only as "unknown".
+    #[test]
+    fn output_that_does_not_parse_also_keeps_the_previous_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_keylock(dir.path(), "echo 'locked pid=1 cmd=x'");
+        let mut probe = LockProbe::new(bin, "w1:p1", &lock_cfg("🔒 ", 300), "keylock").unwrap();
+        assert!(probe.poll(), "locked to begin with");
+
+        let dir = tempfile::tempdir().unwrap();
+        let unparsable = fake_keylock(
+            dir.path(),
+            "echo 'keylock 0.1.0 -- usage: keylock run [--locked] ...'",
+        );
+        probe.bin = unparsable;
+        assert!(
+            probe.poll(),
+            "an exit-0 reply parse_status can't read keeps the last known state"
+        );
+    }
+
     #[test]
     fn a_slow_keylock_is_killed_and_the_state_stands() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = fake_keylock(dir.path(), "exec sleep 10");
-        let mut probe = LockProbe::new(bin, "w1:p1", &lock_cfg("🔒 ", 100), "keylock").unwrap();
+        let locked = fake_keylock(dir.path(), "echo 'locked pid=1 cmd=x'");
+        let mut probe = LockProbe::new(locked, "w1:p1", &lock_cfg("🔒 ", 100), "keylock").unwrap();
+        assert!(probe.poll(), "locked to begin with");
+
+        let dir = tempfile::tempdir().unwrap();
+        let slow = fake_keylock(dir.path(), "exec sleep 10");
+        probe.bin = slow;
         let start = Instant::now();
-        assert!(!probe.poll(), "never locked, so it stays unlocked");
+        assert!(
+            probe.poll(),
+            "a timeout keeps the last known state, not false"
+        );
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "{:?}",
+            start.elapsed()
+        );
+    }
+
+    /// A pipe only reaches EOF once every write end is closed. If `keylock
+    /// status` ever left a detached descendant holding stdout open (an
+    /// auto-started daemon, say), a plain `read_to_string` after the parent
+    /// exits would block on that descendant forever. The probe must instead
+    /// read only what the parent actually wrote before it exited, and return
+    /// promptly regardless of who else still holds the pipe open.
+    #[test]
+    fn a_child_holding_stdout_open_does_not_block_the_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_keylock(dir.path(), "echo 'locked pid=1 cmd=x'; sleep 30 &");
+        let mut probe = LockProbe::new(bin, "w1:p1", &lock_cfg("🔒 ", 300), "keylock").unwrap();
+        let start = Instant::now();
+        assert!(
+            probe.poll(),
+            "the status line is read even though a descendant still holds stdout open"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "must not block on the lingering child: {:?}",
             start.elapsed()
         );
     }
