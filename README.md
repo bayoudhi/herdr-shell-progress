@@ -18,6 +18,21 @@ sidebar as `sleep 6 · running 4s`, then settles into `sleep 6 · ok · 6s`.*
   one exception: the first command after a sticky failure label spends two
   requests wiping it, however fast that command is.
 
+## keylock sessions
+
+[keylock](https://github.com/bayoudhi/keylock) runs a command behind an input
+lock, so a stray Ctrl+C can't kill a long migration. While a tracked command is
+`keylock` and its session is locked, the row wears the lock:
+
+```
+🔒 keylock run -- ./migrate.sh · running 4m12s
+```
+
+The check runs once per tick, only for `keylock` commands, and asks keylock
+itself (`keylock status --pane`), so it follows the pane even after the pane is
+moved. It needs keylock 0.2.0 or newer. Configure or disable it with `[lock]`
+in `config.toml`; an empty `prefix` turns off both the marker and the check.
+
 ## Requirements
 
 - Herdr >= 0.7.0
