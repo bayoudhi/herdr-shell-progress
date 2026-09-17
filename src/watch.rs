@@ -269,6 +269,7 @@ impl Driver {
                 ),
                 Action::Metadata {
                     title,
+                    cmd_token,
                     label,
                     ttl_ms,
                     clear,
@@ -278,6 +279,7 @@ impl Driver {
                     proto::report_metadata(
                         &self.pane,
                         title,
+                        cmd_token,
                         label,
                         ttl_ms,
                         clear,

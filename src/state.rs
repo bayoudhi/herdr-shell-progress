@@ -14,6 +14,11 @@ pub enum Action {
     },
     Metadata {
         title: Option<String>,
+        /// The raw, undecorated command line for the `$cmd` wire token. Never
+        /// carries the lock prefix, even when `title` does: the label
+        /// template's `{cmd}` variable is untouched by the lock, and `$cmd` is
+        /// its wire-protocol equivalent.
+        cmd_token: Option<String>,
         label: Option<(&'static str, String)>,
         ttl_ms: Option<u64>,
         clear: bool,
@@ -140,10 +145,15 @@ impl Machine {
                 Action::ReportAgent {
                     state: AgentState::Working,
                     agent: crate::proto::AGENT_ID.to_string(),
-                    message: Some(self.running_title()),
+                    // A one-shot status string, sent exactly once: never
+                    // decorated, so a session that locks later does not gain a
+                    // prefix it never earned here and one that unlocks does not
+                    // keep a prefix this message has no way to drop.
+                    message: Some(self.title.clone()),
                 },
                 Action::Metadata {
                     title: Some(self.running_title()),
+                    cmd_token: Some(self.title.clone()),
                     label: Some(("working", self.running_label(elapsed))),
                     ttl_ms: None,
                     clear: false,
@@ -156,6 +166,7 @@ impl Machine {
         // command line from the pane for the rest of the command's run.
         vec![Action::Metadata {
             title: Some(self.running_title()),
+            cmd_token: Some(self.title.clone()),
             label: Some(("working", self.running_label(elapsed))),
             ttl_ms: None,
             clear: false,
@@ -187,6 +198,7 @@ impl Machine {
                 },
                 Action::Metadata {
                     title: Some(self.title.clone()),
+                    cmd_token: Some(self.title.clone()),
                     label: Some(("idle", text)),
                     ttl_ms: None,
                     clear: false,
@@ -218,6 +230,7 @@ impl Machine {
             },
             Action::Metadata {
                 title: Some(self.title.clone()),
+                cmd_token: Some(self.title.clone()),
                 label: Some(("idle", text)),
                 ttl_ms: Some(ttl),
                 clear: false,
@@ -261,6 +274,7 @@ pub fn clear_actions(prev_agent: &str) -> Vec<Action> {
     vec![
         Action::Metadata {
             title: None,
+            cmd_token: None,
             label: None,
             ttl_ms: None,
             clear: true,
@@ -348,6 +362,7 @@ mod tests {
                 },
                 Action::Metadata {
                     title: Some("cargo build".into()),
+                    cmd_token: Some("cargo build".into()),
                     label: Some(("working", "running 2s".into())),
                     ttl_ms: None,
                     clear: false,
@@ -417,6 +432,7 @@ mod tests {
             actions,
             vec![Action::Metadata {
                 title: Some("cargo build".into()),
+                cmd_token: Some("cargo build".into()),
                 label: Some(("working", "running 14s".into())),
                 ttl_ms: None,
                 clear: false,
@@ -440,6 +456,7 @@ mod tests {
                 },
                 Action::Metadata {
                     title: Some("cargo build".into()),
+                    cmd_token: Some("cargo build".into()),
                     label: Some(("idle", "exit 1 · 4m12s".into())),
                     ttl_ms: None,
                     clear: false,
@@ -471,6 +488,7 @@ mod tests {
                 },
                 Action::Metadata {
                     title: Some("cargo build".into()),
+                    cmd_token: Some("cargo build".into()),
                     label: Some(("idle", "ok · 4m12s".into())),
                     ttl_ms: Some(20_000),
                     clear: false,
@@ -524,6 +542,7 @@ mod tests {
             actions[1],
             Action::Metadata {
                 title: Some("cargo build".into()),
+                cmd_token: Some("cargo build".into()),
                 label: Some(("idle", "SIGINT · 12s".into())),
                 ttl_ms: Some(20_000),
                 clear: false,
@@ -599,6 +618,7 @@ mod tests {
             actions[1],
             Action::Metadata {
                 title: Some("cargo build".into()),
+                cmd_token: Some("cargo build".into()),
                 label: Some(("idle", "12s".into())),
                 ttl_ms: Some(20_000),
                 clear: false,
@@ -723,6 +743,7 @@ mod tests {
             vec![
                 Action::Metadata {
                     title: None,
+                    cmd_token: None,
                     label: None,
                     ttl_ms: None,
                     clear: true,
@@ -764,11 +785,49 @@ mod tests {
             Some(true),
             "the title shows the lock too: {metadata:?}"
         );
+        // F4: ReportAgent.message is a one-shot status string, sent exactly
+        // once. Decorating it would freeze whatever lock state happened to be
+        // true at that single moment for the rest of the run — a session that
+        // locks later would never gain the prefix here, and one that unlocks
+        // would keep it forever. So it must never carry the lock at all; only
+        // the fields that update every tick (title, display_agent) do.
         let message = actions.iter().find_map(|a| match a {
             Action::ReportAgent { message, .. } => message.clone(),
             _ => None,
         });
-        assert_eq!(message.as_deref().map(|m| m.starts_with("🔒 ")), Some(true));
+        assert_eq!(
+            message.as_deref(),
+            Some("cargo build"),
+            "the one-shot agent message must never carry the lock prefix"
+        );
+    }
+
+    /// F1: `$cmd` must stay the raw command line even while locked — only the
+    /// pane title and the row name show the lock.
+    #[test]
+    fn a_locked_running_reports_cmd_token_stays_undecorated() {
+        let mut m = machine();
+        m.set_locked(true);
+        let actions = m.on_tick(1_002_000);
+        let (title, cmd_token) = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Metadata {
+                    title, cmd_token, ..
+                } => Some((title.clone(), cmd_token.clone())),
+                _ => None,
+            })
+            .expect("a running report carries metadata");
+        assert_eq!(
+            title.as_deref(),
+            Some("🔒 cargo build"),
+            "the pane title shows the lock"
+        );
+        assert_eq!(
+            cmd_token.as_deref(),
+            Some("cargo build"),
+            "the $cmd token must never carry the lock prefix"
+        );
     }
 
     #[test]
