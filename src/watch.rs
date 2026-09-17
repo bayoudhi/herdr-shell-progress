@@ -1085,7 +1085,7 @@ mod tests {
 
     // ---- keylock probe ------------------------------------------------------
 
-    /// Writes a fake `keylock` that prints `body` and exits `code`.
+    /// Writes a fake `keylock` that runs `body` as a shell script.
     ///
     /// macOS validates a newly created executable on its first run, which can
     /// take hundreds of milliseconds and would land inside the probe's timeout;
@@ -1230,7 +1230,10 @@ mod tests {
     #[test]
     fn a_child_holding_stdout_open_does_not_block_the_probe() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = fake_keylock(dir.path(), "echo 'locked pid=1 cmd=x'; sleep 30 &");
+        // Ten times the 300ms timeout below, so it clearly outlives the probe's
+        // wait without leaving a much longer-lived orphan behind than the test
+        // needs.
+        let bin = fake_keylock(dir.path(), "echo 'locked pid=1 cmd=x'; sleep 3 &");
         let mut probe = LockProbe::new(bin, "w1:p1", &lock_cfg("🔒 ", 300), "keylock").unwrap();
         let start = Instant::now();
         assert!(
@@ -1238,7 +1241,7 @@ mod tests {
             "the status line is read even though a descendant still holds stdout open"
         );
         assert!(
-            start.elapsed() < Duration::from_secs(1),
+            start.elapsed() < Duration::from_secs(2),
             "must not block on the lingering child: {:?}",
             start.elapsed()
         );

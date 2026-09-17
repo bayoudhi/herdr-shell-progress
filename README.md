@@ -29,9 +29,11 @@ lock, so a stray Ctrl+C can't kill a long migration. While a tracked command is
 ```
 
 The check runs once per tick, only for `keylock` commands, and asks keylock
-itself (`keylock status --pane`), so it follows the pane even after the pane is
-moved. It needs keylock 0.2.0 or newer. Configure or disable it with `[lock]`
-in `config.toml`; an empty `prefix` turns off both the marker and the check.
+itself (`keylock status --pane`) rather than guessing from the command line.
+It needs keylock 0.2.0 or newer. Configure or disable it with `[lock]` in
+`config.toml`; an empty `prefix` turns off both the marker and the check.
+Point `HSP_KEYLOCK_BIN` at a different binary to override which `keylock` the
+probe runs — mainly useful for debugging.
 
 ## Requirements
 
