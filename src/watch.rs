@@ -5,6 +5,7 @@ use crate::proto;
 use crate::socket::{self, SendError};
 use crate::state::{self, Action, Machine};
 use signal_hook::consts::{SIGTERM, SIGUSR1};
+use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -463,7 +464,34 @@ impl LockProbe {
     }
 }
 
+/// The three environment lookups `run()` needs, read once up front so the
+/// rest of the function never touches `std::env` directly. Tests build one of
+/// these with explicit values instead of mutating process-wide environment,
+/// which would be unsound to do while other tests are running in parallel
+/// threads of the same process.
+pub struct Overrides {
+    pub keylock_bin: OsString,
+    pub socket_path: PathBuf,
+    pub config_dir: Option<PathBuf>,
+}
+
+impl Overrides {
+    /// Reads exactly what `keylock_bin()`, `socket_path()` and `config_dir()`
+    /// read from the environment, with the same fallbacks.
+    pub fn from_env() -> Overrides {
+        Overrides {
+            keylock_bin: keylock_bin(),
+            socket_path: socket_path(),
+            config_dir: config_dir(),
+        }
+    }
+}
+
 pub fn run(args: Args) -> i32 {
+    run_with(args, Overrides::from_env())
+}
+
+fn run_with(args: Args, overrides: Overrides) -> i32 {
     // Read the clock before anything else: a shell that passed `--start-now`
     // has no start of its own, so every millisecond spent below would otherwise
     // be charged to the command rather than to this process.
@@ -472,7 +500,7 @@ pub fn run(args: Args) -> i32 {
         Start::Now => now_ms(),
     };
 
-    let cfg = Config::load(config_dir().as_deref());
+    let cfg = Config::load(overrides.config_dir.as_deref());
     let tick_ms = cfg.tick_ms;
 
     let cmd_line = read_trimmed(&args.state_dir.join("cmd")).unwrap_or_default();
@@ -483,7 +511,7 @@ pub fn run(args: Args) -> i32 {
     let mut driver = Driver {
         pane: args.pane.clone(),
         state_dir: args.state_dir.clone(),
-        socket: socket_path(),
+        socket: overrides.socket_path,
         failures: 0,
         seq: 0,
     };
@@ -527,7 +555,7 @@ pub fn run(args: Args) -> i32 {
 
     let marker = driver.marker_path();
     let own_agent = own_agent_id();
-    let mut lock_probe = LockProbe::new(keylock_bin(), &args.pane, &cfg, &agent);
+    let mut lock_probe = LockProbe::new(overrides.keylock_bin, &args.pane, &cfg, &agent);
     let mut machine = Machine::new(cfg, agent, title, display, start_ms);
 
     loop {
@@ -1268,15 +1296,12 @@ mod tests {
     // override and a fake Herdr socket, following the `UnixListener` harness
     // `fake_server` already uses above.
     //
-    // `run()` reads three process-wide environment variables (`HSP_KEYLOCK_BIN`,
-    // `HERDR_SOCKET_PATH`, `HERDR_PLUGIN_CONFIG_DIR`) and installs a real
-    // process-wide SIGUSR1/SIGTERM handler. This binary's tests run in parallel
-    // threads of one process, so two of these tests running at once would each
-    // stomp the other's environment and each other's signals. Only the tests in
-    // this section touch any of that, so serializing just this section is
-    // enough — no other test sets these variables or sends these signals for
-    // real.
-    static RUN_ENV: Mutex<()> = Mutex::new(());
+    // `run_with()` takes its `HSP_KEYLOCK_BIN`/`HERDR_SOCKET_PATH`/
+    // `HERDR_PLUGIN_CONFIG_DIR` equivalents as an explicit `Overrides` value
+    // instead of reading the environment, so these tests can run in parallel
+    // with the rest of the suite without mutating process-wide state. `run()`
+    // still installs a real process-wide SIGUSR1/SIGTERM handler, but nothing
+    // else in this suite sends those signals for real, so that's safe to share.
 
     /// Stands in for Herdr like `fake_server`, but keeps the whole parsed
     /// request instead of only its method name, so a test can inspect the
@@ -1339,8 +1364,6 @@ mod tests {
 
     #[test]
     fn run_reports_the_decorated_row_while_a_tracked_keylock_session_is_locked() {
-        let _guard = RUN_ENV.lock().unwrap();
-
         let sockdir = state_dir();
         let (socket, payloads) = fake_server_capturing(sockdir.path());
 
@@ -1367,17 +1390,15 @@ mod tests {
         let cmddir = state_dir();
         std::fs::write(cmddir.path().join("cmd"), "keylock run -- ./m.sh").unwrap();
 
-        std::env::set_var("HSP_KEYLOCK_BIN", &keylock);
-        std::env::set_var("HERDR_SOCKET_PATH", &socket);
-        std::env::set_var("HERDR_PLUGIN_CONFIG_DIR", cfgdir.path());
+        let overrides = Overrides {
+            keylock_bin: keylock.clone(),
+            socket_path: socket.clone(),
+            config_dir: Some(cfgdir.path().to_path_buf()),
+        };
 
         let finisher = finish_after(cmddir.path(), "0", 300);
-        let code = run(args_for("w1:p2", cmddir.path()));
+        let code = run_with(args_for("w1:p2", cmddir.path()), overrides);
         finisher.join().unwrap();
-
-        std::env::remove_var("HSP_KEYLOCK_BIN");
-        std::env::remove_var("HERDR_SOCKET_PATH");
-        std::env::remove_var("HERDR_PLUGIN_CONFIG_DIR");
 
         assert_eq!(code, 0);
         assert_eq!(
@@ -1410,8 +1431,6 @@ mod tests {
 
     #[test]
     fn run_never_spawns_the_probe_for_a_non_keylock_command() {
-        let _guard = RUN_ENV.lock().unwrap();
-
         let sockdir = state_dir();
         let (socket, payloads) = fake_server_capturing(sockdir.path());
 
@@ -1435,17 +1454,15 @@ mod tests {
         let cmddir = state_dir();
         std::fs::write(cmddir.path().join("cmd"), "cargo build").unwrap();
 
-        std::env::set_var("HSP_KEYLOCK_BIN", &keylock);
-        std::env::set_var("HERDR_SOCKET_PATH", &socket);
-        std::env::set_var("HERDR_PLUGIN_CONFIG_DIR", cfgdir.path());
+        let overrides = Overrides {
+            keylock_bin: keylock.clone(),
+            socket_path: socket.clone(),
+            config_dir: Some(cfgdir.path().to_path_buf()),
+        };
 
         let finisher = finish_after(cmddir.path(), "0", 300);
-        let code = run(args_for("w1:p3", cmddir.path()));
+        let code = run_with(args_for("w1:p3", cmddir.path()), overrides);
         finisher.join().unwrap();
-
-        std::env::remove_var("HSP_KEYLOCK_BIN");
-        std::env::remove_var("HERDR_SOCKET_PATH");
-        std::env::remove_var("HERDR_PLUGIN_CONFIG_DIR");
 
         assert_eq!(code, 0);
         assert!(
