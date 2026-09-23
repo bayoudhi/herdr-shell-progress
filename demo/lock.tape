@@ -31,9 +31,9 @@
 Output demo/lock.gif
 
 Set Shell zsh
-Set FontSize 13
-Set Width 1500
-Set Height 640
+Set FontSize 15
+Set Width 1100
+Set Height 600
 Set Padding 15
 Set Framerate 12
 Set PlaybackSpeed 1.0
@@ -43,12 +43,15 @@ Set PlaybackSpeed 1.0
 # Herdr refuses to launch nested. The PATH prefix is there because vhs spawns
 # a non-login shell, which on macOS may not have Homebrew's bin on PATH.
 Hide
+# The size settings above match demo/demo.tape, so both GIFs in the README
+# look like the same terminal.
+#
 # Record from a scratch directory, not the repo: a neutral workspace name keeps
 # branch names and other plugins' rows (PR counts and the like) out of the GIF.
 # The demo config narrows the row name so the elapsed label always fits the
 # sidebar: Herdr's sidebar is a fixed ~26 columns, so the demo shortens both
 # the row name and the running label, and the pane still shows the whole
-# command. With the stock config the row reads `keylock run -- ./m\u2026 \u00b7 running 16s`
+# command. With the stock config the row reads `keylock run -- ./m… · running 16s`
 # and Herdr clips the tail.
 Type "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH"
 Enter
@@ -97,7 +100,14 @@ Ctrl+C
 Sleep 3s
 
 # The phrase unlocks the session; the lock leaves the row within a tick.
+#
+# Typed slowly on purpose. keylock unlocks on the last six keys typed, so the
+# phrase is a rolling window rather than a line, and the overlay spells it out
+# letter by letter as it fills. At the default 50ms that whole reveal would
+# last a third of a second — one frame and a half.
+Set TypingSpeed 300ms
 Type "unlock"
+Set TypingSpeed 50ms
 Sleep 4s
 
 # Unlocked: the next key reaches the job, which aborts.
