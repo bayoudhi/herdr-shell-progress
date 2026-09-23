@@ -37,10 +37,12 @@ the lock:
 
 ![keylock demo](demo/lock.gif)
 
-*The job aborts on any keypress, so the counter running on is the proof: while
-the session is locked every key is dropped and the row wears 🔒. The unlock
-phrase clears the lock within a tick, and the next key then reaches the job,
-which aborts as it would have all along.*
+*The caption at the bottom names each key as it is pressed, and whether it got
+through. The job aborts on any keypress, so the counter running on is the
+proof: while the session is locked every key — `a`, Space, even Ctrl+C — is
+dropped, and the row wears 🔒. Typing the unlock phrase clears the lock within
+a tick, and the next key then reaches the job, which aborts as it would have
+all along.*
 
 The check runs once per tick, only for `keylock` commands, and asks keylock
 itself (`keylock status --pane`) rather than guessing from the command line.

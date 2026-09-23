@@ -80,28 +80,29 @@ Show
 
 # A locked keylock session. demo/migrate-sim.sh aborts the moment it reads a
 # key, so the counter running on is proof that nothing reached it.
+#
+# Keys below are pressed one at a time with a pause after each, because the
+# published GIF labels them with an overlay (demo/keycast.py) whose timings
+# follow this sequence. Change the sleeps here and the overlay must change too.
 Type "keylock run --locked -- ./migrate-sim.sh"
 Enter
-Sleep 7s
+Sleep 6s
 
-# Type at it. Every key is dropped — the job keeps counting, and keylock
-# answers each keystroke by flashing the lock in the pane title.
-Type "space"
-Sleep 1s
-Type " and any other key would abort this"
-Sleep 3s
+# Locked: each key is dropped, and the counter keeps climbing.
+Type "a"
+Sleep 2s
+Space
+Sleep 2s
 Ctrl+C
+Sleep 3s
+
+# The phrase unlocks the session; the lock leaves the row within a tick.
+Type "unlock"
 Sleep 4s
 
-# The phrase unlocks the session. The lock leaves the sidebar row within a
-# tick, and the job is still running.
-Type "unlock"
-Sleep 5s
-
-# Unlocked: the very next key reaches the job, which aborts as it would have
-# all along.
+# Unlocked: the next key reaches the job, which aborts.
 Type "x"
-Sleep 5s
+Sleep 4s
 
 # Tear the demo session down with `prefix+q`. The prefix is ctrl+b out of the
 # box — this line uses ctrl+a, so match it to your own binding.
