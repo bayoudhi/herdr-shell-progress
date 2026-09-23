@@ -14,9 +14,42 @@ sidebar as `sleep 6 · running 4s`, then settles into `sleep 6 · ok · 6s`.*
 - Fast commands are invisible — nothing flickers when you run `ls`.
 - Failures stick until your next command, so you see what broke while away.
 - Successes clear themselves after 20 seconds by default.
+- A [keylock](https://github.com/bayoudhi/keylock) session that is locked
+  wears a 🔒 while it runs, so you can see the pane is protected.
 - Zero socket traffic and zero output for commands under the threshold — with
   one exception: the first command after a sticky failure label spends two
   requests wiping it, however fast that command is.
+
+## keylock sessions
+
+[keylock](https://github.com/bayoudhi/keylock) runs a command behind an input
+lock: while the session is locked it drops every key, so a stray Space or
+Ctrl+C cannot interrupt a long migration. Nothing in Herdr's own chrome shows
+that a pane is locked. This plugin already owns that sidebar row, so it shows
+it here.
+
+While a tracked command is `keylock` and its session is locked, the row wears
+the lock:
+
+```
+🔒 keylock run -- ./migrate.sh · running 4m12s
+```
+
+![keylock demo](demo/lock.gif)
+
+*The caption at the bottom names each key as it is pressed, and whether it got
+through. The job aborts on any keypress, so the counter running on is the
+proof: while the session is locked every key — `a`, Space, even Ctrl+C — is
+dropped, and the row wears 🔒. Typing the unlock phrase clears the lock within
+a tick, and the next key then reaches the job, which aborts as it would have
+all along.*
+
+The check runs once per tick, only for `keylock` commands, and asks keylock
+itself (`keylock status --pane`) rather than guessing from the command line.
+It needs keylock 0.2.0 or newer. Configure or disable it with `[lock]` in
+`config.toml`; an empty `prefix` turns off both the marker and the check.
+Point `HSP_KEYLOCK_BIN` at a different binary to override which `keylock` the
+probe runs — mainly useful for debugging.
 
 ## Requirements
 

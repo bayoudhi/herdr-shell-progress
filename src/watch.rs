@@ -5,7 +5,11 @@ use crate::proto;
 use crate::socket::{self, SendError};
 use crate::state::{self, Action, Machine};
 use signal_hook::consts::{SIGTERM, SIGUSR1};
+use std::ffi::OsString;
+use std::io::Read;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -266,6 +270,7 @@ impl Driver {
                 ),
                 Action::Metadata {
                     title,
+                    cmd_token,
                     label,
                     ttl_ms,
                     clear,
@@ -275,6 +280,7 @@ impl Driver {
                     proto::report_metadata(
                         &self.pane,
                         title,
+                        cmd_token,
                         label,
                         ttl_ms,
                         clear,
@@ -317,7 +323,175 @@ fn no_linger() -> impl FnMut(u64) -> Lingered {
     |_| Lingered::Completed
 }
 
+/// How often the probe checks on a `keylock status` it is waiting for.
+const LOCK_POLL_MS: u64 = 5;
+
+/// Upper bound on how much of a finished `keylock status`'s stdout the probe
+/// ever reads. A status line is a handful of bytes; this is only a backstop.
+const LOCK_REPLY_CAP: usize = 8 * 1024;
+
+/// Reads whatever is already buffered on `pipe` without blocking.
+///
+/// `keylock status` has already exited by the time this runs, so its own
+/// write end of the pipe is closed — but a pipe only signals EOF once every
+/// write end is closed, and a misbehaving `keylock` could leave a detached
+/// descendant (an auto-started daemon, say) holding stdout open. A plain
+/// `read_to_string` would then block forever, well past `timeout_ms`, and the
+/// watcher would never return to its loop. Putting the fd in non-blocking mode
+/// first means this drains only what is already sitting in the pipe buffer —
+/// exactly what the exited child actually wrote — and returns the moment
+/// nothing more is immediately available.
+fn read_available(pipe: &mut std::process::ChildStdout) -> String {
+    let fd = pipe.as_raw_fd();
+    // SAFETY: `fd` is a valid, open file descriptor for the lifetime of this
+    // call (it is borrowed from `pipe`, which outlives it); `fcntl` with
+    // F_GETFL/F_SETFL on it is an ordinary, side-effect-local syscall.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while buf.len() < LOCK_REPLY_CAP {
+        match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let take = n.min(LOCK_REPLY_CAP - buf.len());
+                buf.extend_from_slice(&chunk[..take]);
+            }
+            // Nothing more is buffered right now — that's the point of going
+            // non-blocking, not an error.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// `keylock` to run, overridable with `HSP_KEYLOCK_BIN`.
+fn keylock_bin() -> std::ffi::OsString {
+    std::env::var_os("HSP_KEYLOCK_BIN")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "keylock".into())
+}
+
+/// Asks keylock whether this pane's session is locked.
+///
+/// Built only for a tracked `keylock` command, so an ordinary slow command
+/// never spawns anything. Every failure keeps the previous answer: the row must
+/// never stall or flicker because keylock was slow.
+struct LockProbe {
+    bin: std::ffi::OsString,
+    pane: String,
+    timeout: Duration,
+    /// Cleared when keylock turns out not to be runnable at all.
+    enabled: bool,
+    locked: bool,
+}
+
+impl LockProbe {
+    fn new(bin: std::ffi::OsString, pane: &str, cfg: &Config, agent: &str) -> Option<LockProbe> {
+        if pane.is_empty() || cfg.lock.prefix.is_empty() || !crate::lock::is_keylock(agent) {
+            return None;
+        }
+        Some(LockProbe {
+            bin,
+            pane: pane.to_string(),
+            timeout: Duration::from_millis(cfg.lock.timeout_ms),
+            enabled: true,
+            locked: false,
+        })
+    }
+
+    /// The lock state for this tick.
+    fn poll(&mut self) -> bool {
+        if !self.enabled {
+            return self.locked;
+        }
+        let mut child = match Command::new(&self.bin)
+            .arg("status")
+            .arg("--pane")
+            .arg(&self.pane)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                // A binary that cannot be found or executed now will not start
+                // later either: stop paying for a spawn every tick.
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) {
+                    self.enabled = false;
+                }
+                return self.locked;
+            }
+        };
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        return self.locked;
+                    }
+                    let stdout = match child.stdout.take() {
+                        Some(mut pipe) => read_available(&mut pipe),
+                        None => String::new(),
+                    };
+                    if let Some(locked) = crate::lock::parse_status(&stdout) {
+                        self.locked = locked;
+                    }
+                    return self.locked;
+                }
+                Ok(None) if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return self.locked;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(LOCK_POLL_MS)),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return self.locked;
+                }
+            }
+        }
+    }
+}
+
+/// The three environment lookups `run()` needs, read once up front so the
+/// rest of the function never touches `std::env` directly. Tests build one of
+/// these with explicit values instead of mutating process-wide environment,
+/// which would be unsound to do while other tests are running in parallel
+/// threads of the same process.
+pub struct Overrides {
+    pub keylock_bin: OsString,
+    pub socket_path: PathBuf,
+    pub config_dir: Option<PathBuf>,
+}
+
+impl Overrides {
+    /// Reads exactly what `keylock_bin()`, `socket_path()` and `config_dir()`
+    /// read from the environment, with the same fallbacks.
+    pub fn from_env() -> Overrides {
+        Overrides {
+            keylock_bin: keylock_bin(),
+            socket_path: socket_path(),
+            config_dir: config_dir(),
+        }
+    }
+}
+
 pub fn run(args: Args) -> i32 {
+    run_with(args, Overrides::from_env())
+}
+
+fn run_with(args: Args, overrides: Overrides) -> i32 {
     // Read the clock before anything else: a shell that passed `--start-now`
     // has no start of its own, so every millisecond spent below would otherwise
     // be charged to the command rather than to this process.
@@ -326,7 +500,7 @@ pub fn run(args: Args) -> i32 {
         Start::Now => now_ms(),
     };
 
-    let cfg = Config::load(config_dir().as_deref());
+    let cfg = Config::load(overrides.config_dir.as_deref());
     let tick_ms = cfg.tick_ms;
 
     let cmd_line = read_trimmed(&args.state_dir.join("cmd")).unwrap_or_default();
@@ -337,7 +511,7 @@ pub fn run(args: Args) -> i32 {
     let mut driver = Driver {
         pane: args.pane.clone(),
         state_dir: args.state_dir.clone(),
-        socket: socket_path(),
+        socket: overrides.socket_path,
         failures: 0,
         seq: 0,
     };
@@ -381,6 +555,7 @@ pub fn run(args: Args) -> i32 {
 
     let marker = driver.marker_path();
     let own_agent = own_agent_id();
+    let mut lock_probe = LockProbe::new(overrides.keylock_bin, &args.pane, &cfg, &agent);
     let mut machine = Machine::new(cfg, agent, title, display, start_ms);
 
     loop {
@@ -409,6 +584,9 @@ pub fn run(args: Args) -> i32 {
                     driver.apply(machine.on_shell_gone(), &mut no_linger());
                     return 0;
                 }
+                if let Some(probe) = lock_probe.as_mut() {
+                    machine.set_locked(probe.poll());
+                }
                 if !driver.apply(machine.on_tick(now_ms()), &mut no_linger()) {
                     // The pane is gone or the socket gave up. Nothing more can
                     // be reported, but the shell still holds our PID.
@@ -429,6 +607,7 @@ pub fn run(args: Args) -> i32 {
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
     use std::sync::{Arc, Mutex};
 
@@ -930,5 +1109,382 @@ mod tests {
             "a name left behind would rename the next command from a shell that writes none"
         );
         assert_eq!(ignore_name(dir.path(), "cargo build"), "cargo");
+    }
+
+    // ---- keylock probe ------------------------------------------------------
+
+    /// Writes a fake `keylock` that runs `body` as a shell script.
+    ///
+    /// macOS validates a newly created executable on its first run, which can
+    /// take hundreds of milliseconds and would land inside the probe's timeout;
+    /// Linux refuses to exec a file another process still holds open for
+    /// writing. So the script is run once here, retrying while it reports
+    /// `ExecutableFileBusy`.
+    fn fake_keylock(dir: &Path, body: &str) -> std::ffi::OsString {
+        let bin = dir.join("keylock");
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\n[ -n \"$HSP_FAKE_WARMUP\" ] && exit 0\n{body}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for attempt in 0..50 {
+            match Command::new(&bin).env("HSP_FAKE_WARMUP", "1").status() {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 49 => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("warming up the fake keylock failed: {e}"),
+            }
+        }
+        bin.into_os_string()
+    }
+
+    fn lock_cfg(prefix: &str, timeout_ms: u64) -> Config {
+        let mut cfg = Config::default();
+        cfg.lock.prefix = prefix.to_string();
+        cfg.lock.timeout_ms = timeout_ms;
+        cfg
+    }
+
+    #[test]
+    fn the_probe_is_built_only_for_a_keylock_command_in_a_pane() {
+        let cfg = lock_cfg("🔒 ", 300);
+        let bin = std::ffi::OsString::from("keylock");
+        assert!(LockProbe::new(bin.clone(), "w1:p1", &cfg, "keylock").is_some());
+        assert!(LockProbe::new(bin.clone(), "w1:p1", &cfg, "cargo").is_none());
+        assert!(LockProbe::new(bin.clone(), "", &cfg, "keylock").is_none());
+        assert!(LockProbe::new(bin, "w1:p1", &lock_cfg("", 300), "keylock").is_none());
+    }
+
+    #[test]
+    fn the_probe_reads_keylocks_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_keylock(dir.path(), "echo 'locked pid=1 cmd=./m.sh'");
+        let mut probe = LockProbe::new(bin, "w1:p1", &lock_cfg("🔒 ", 300), "keylock").unwrap();
+        assert!(probe.poll());
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_keylock(dir.path(), "echo 'unlocked pid=1 cmd=./m.sh'");
+        let mut probe = LockProbe::new(bin, "w1:p1", &lock_cfg("🔒 ", 300), "keylock").unwrap();
+        assert!(!probe.poll());
+    }
+
+    #[test]
+    fn the_probe_passes_the_pane_to_keylock() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("argv");
+        let bin = fake_keylock(
+            dir.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{}'; echo 'locked pid=1 cmd=x'",
+                log.display()
+            ),
+        );
+        let mut probe = LockProbe::new(bin, "w9:p3", &lock_cfg("🔒 ", 300), "keylock").unwrap();
+        probe.poll();
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().trim(),
+            "status --pane w9:p3"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_answer_keeps_the_previous_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_keylock(dir.path(), "echo 'locked pid=1 cmd=x'");
+        let mut probe = LockProbe::new(bin, "w1:p1", &lock_cfg("🔒 ", 300), "keylock").unwrap();
+        assert!(probe.poll(), "locked to begin with");
+
+        let dir = tempfile::tempdir().unwrap();
+        let failing = fake_keylock(
+            dir.path(),
+            "echo 'keylock: no session in pane w1:p1' >&2; exit 1",
+        );
+        probe.bin = failing;
+        assert!(probe.poll(), "a failed check keeps the last known state");
+    }
+
+    /// Exit 0 with output `parse_status` cannot read — usage text from a
+    /// keylock older than 0.2.0 is exactly this shape — is the third fallback
+    /// the spec names: it must not be read as unlocked, only as "unknown".
+    #[test]
+    fn output_that_does_not_parse_also_keeps_the_previous_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_keylock(dir.path(), "echo 'locked pid=1 cmd=x'");
+        let mut probe = LockProbe::new(bin, "w1:p1", &lock_cfg("🔒 ", 300), "keylock").unwrap();
+        assert!(probe.poll(), "locked to begin with");
+
+        let dir = tempfile::tempdir().unwrap();
+        let unparsable = fake_keylock(
+            dir.path(),
+            "echo 'keylock 0.1.0 -- usage: keylock run [--locked] ...'",
+        );
+        probe.bin = unparsable;
+        assert!(
+            probe.poll(),
+            "an exit-0 reply parse_status can't read keeps the last known state"
+        );
+    }
+
+    #[test]
+    fn a_slow_keylock_is_killed_and_the_state_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let locked = fake_keylock(dir.path(), "echo 'locked pid=1 cmd=x'");
+        let mut probe = LockProbe::new(locked, "w1:p1", &lock_cfg("🔒 ", 100), "keylock").unwrap();
+        assert!(probe.poll(), "locked to begin with");
+
+        let dir = tempfile::tempdir().unwrap();
+        let slow = fake_keylock(dir.path(), "exec sleep 10");
+        probe.bin = slow;
+        let start = Instant::now();
+        assert!(
+            probe.poll(),
+            "a timeout keeps the last known state, not false"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    /// A pipe only reaches EOF once every write end is closed. If `keylock
+    /// status` ever left a detached descendant holding stdout open (an
+    /// auto-started daemon, say), a plain `read_to_string` after the parent
+    /// exits would block on that descendant forever. The probe must instead
+    /// read only what the parent actually wrote before it exited, and return
+    /// promptly regardless of who else still holds the pipe open.
+    #[test]
+    fn a_child_holding_stdout_open_does_not_block_the_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        // Ten times the 300ms timeout below, so it clearly outlives the probe's
+        // wait without leaving a much longer-lived orphan behind than the test
+        // needs.
+        let bin = fake_keylock(dir.path(), "echo 'locked pid=1 cmd=x'; sleep 3 &");
+        let mut probe = LockProbe::new(bin, "w1:p1", &lock_cfg("🔒 ", 300), "keylock").unwrap();
+        let start = Instant::now();
+        assert!(
+            probe.poll(),
+            "the status line is read even though a descendant still holds stdout open"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "must not block on the lingering child: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_missing_keylock_switches_the_probe_off() {
+        let mut probe = LockProbe::new(
+            std::ffi::OsString::from("/nonexistent/keylock"),
+            "w1:p1",
+            &lock_cfg("🔒 ", 300),
+            "keylock",
+        )
+        .unwrap();
+        assert!(!probe.poll());
+        assert!(!probe.enabled, "one failed spawn, not one per tick");
+    }
+
+    // ---- run(): the spec's missing integration test (F3) -------------------
+    //
+    // Nothing else drives `run()` itself, so the wiring lines — building the
+    // probe from the real args, calling `set_locked` before `on_tick` — have no
+    // automated cover. These tests do, against a fake `keylock` on PATH-like
+    // override and a fake Herdr socket, following the `UnixListener` harness
+    // `fake_server` already uses above.
+    //
+    // `run_with()` takes its `HSP_KEYLOCK_BIN`/`HERDR_SOCKET_PATH`/
+    // `HERDR_PLUGIN_CONFIG_DIR` equivalents as an explicit `Overrides` value
+    // instead of reading the environment, so these tests can run in parallel
+    // with the rest of the suite without mutating process-wide state. `run()`
+    // still installs a real process-wide SIGUSR1/SIGTERM handler, but nothing
+    // else in this suite sends those signals for real, so that's safe to share.
+
+    /// Stands in for Herdr like `fake_server`, but keeps the whole parsed
+    /// request instead of only its method name, so a test can inspect the
+    /// title/display_agent/tokens a `report_metadata` call actually carried.
+    fn fake_server_capturing(dir: &Path) -> (PathBuf, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let path = dir.join("herdr.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&log);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    break;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    sink.lock().unwrap().push(v);
+                }
+                let mut stream = reader.into_inner();
+                let _ = stream.write_all(b"{\"id\":\"1\",\"result\":{\"type\":\"ok\"}}\n");
+            }
+        });
+        (path, log)
+    }
+
+    /// `Start::At` far in the past so the very first `next_wake_ms` already
+    /// reads as past the (default, 2s) threshold — the run loop reports on its
+    /// first pass instead of the test having to wait out a real 2 seconds.
+    fn args_for(pane: &str, state_dir: &Path) -> Args {
+        Args {
+            pane: pane.to_string(),
+            shell_pid: std::process::id() as i32,
+            start: Start::At(now_ms().saturating_sub(5_000)),
+            state_dir: state_dir.to_path_buf(),
+            clear_first: false,
+        }
+    }
+
+    /// Writes the exit code and sends the real `SIGUSR1` `precmd` would send,
+    /// after a pause long enough for `run()`'s first tick (probe spawn plus one
+    /// report) to have already happened — comfortably inside the default 2s
+    /// `tick_ms` wait the loop is otherwise sitting in.
+    fn finish_after(
+        state_dir: &Path,
+        exit_code: &str,
+        delay_ms: u64,
+    ) -> std::thread::JoinHandle<()> {
+        let exit_path = state_dir.join("exit");
+        let code = exit_code.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            std::fs::write(&exit_path, code).unwrap();
+            unsafe {
+                libc::kill(std::process::id() as i32, SIGUSR1);
+            }
+        })
+    }
+
+    #[test]
+    fn run_reports_the_decorated_row_while_a_tracked_keylock_session_is_locked() {
+        let sockdir = state_dir();
+        let (socket, payloads) = fake_server_capturing(sockdir.path());
+
+        // success_sticky_ms = 0 skips the idle report and the linger entirely,
+        // so the only report_metadata this run ever sends is the locked,
+        // running one under test.
+        let cfgdir = state_dir();
+        std::fs::write(
+            cfgdir.path().join("config.toml"),
+            "[finish]\nsuccess_sticky_ms = 0\n",
+        )
+        .unwrap();
+
+        let keylockdir = state_dir();
+        let argv_log = keylockdir.path().join("argv");
+        let keylock = fake_keylock(
+            keylockdir.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{}'; echo 'locked pid=1 cmd=./m.sh'",
+                argv_log.display()
+            ),
+        );
+
+        let cmddir = state_dir();
+        std::fs::write(cmddir.path().join("cmd"), "keylock run -- ./m.sh").unwrap();
+
+        let overrides = Overrides {
+            keylock_bin: keylock.clone(),
+            socket_path: socket.clone(),
+            config_dir: Some(cfgdir.path().to_path_buf()),
+        };
+
+        let finisher = finish_after(cmddir.path(), "0", 300);
+        let code = run_with(args_for("w1:p2", cmddir.path()), overrides);
+        finisher.join().unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            std::fs::read_to_string(&argv_log).unwrap().trim(),
+            "status --pane w1:p2",
+            "the probe must ask keylock about this run's own pane"
+        );
+
+        let payloads = payloads.lock().unwrap();
+        let metadata = payloads
+            .iter()
+            .find(|v| v["method"] == "pane.report_metadata")
+            .expect("a running report_metadata reached the fake socket");
+        let title = metadata["params"]["title"].as_str().unwrap();
+        let display = metadata["params"]["display_agent"].as_str().unwrap();
+        let cmd_token = metadata["params"]["tokens"]["cmd"].as_str().unwrap();
+        assert!(
+            title.starts_with("🔒 "),
+            "the pane title shows the lock: {title}"
+        );
+        assert!(
+            display.starts_with("🔒 "),
+            "the row name shows the lock: {display}"
+        );
+        assert!(
+            !cmd_token.starts_with("🔒 "),
+            "$cmd must stay undecorated even while locked: {cmd_token}"
+        );
+    }
+
+    #[test]
+    fn run_never_spawns_the_probe_for_a_non_keylock_command() {
+        let sockdir = state_dir();
+        let (socket, payloads) = fake_server_capturing(sockdir.path());
+
+        let cfgdir = state_dir();
+        std::fs::write(
+            cfgdir.path().join("config.toml"),
+            "[finish]\nsuccess_sticky_ms = 0\n",
+        )
+        .unwrap();
+
+        let keylockdir = state_dir();
+        let argv_log = keylockdir.path().join("argv");
+        let keylock = fake_keylock(
+            keylockdir.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{}'; echo 'locked pid=1 cmd=x'",
+                argv_log.display()
+            ),
+        );
+
+        let cmddir = state_dir();
+        std::fs::write(cmddir.path().join("cmd"), "cargo build").unwrap();
+
+        let overrides = Overrides {
+            keylock_bin: keylock.clone(),
+            socket_path: socket.clone(),
+            config_dir: Some(cfgdir.path().to_path_buf()),
+        };
+
+        let finisher = finish_after(cmddir.path(), "0", 300);
+        let code = run_with(args_for("w1:p3", cmddir.path()), overrides);
+        finisher.join().unwrap();
+
+        assert_eq!(code, 0);
+        assert!(
+            !argv_log.exists(),
+            "a non-keylock command must never invoke the probe"
+        );
+
+        let payloads = payloads.lock().unwrap();
+        assert!(
+            payloads
+                .iter()
+                .any(|v| v["method"] == "pane.report_metadata"),
+            "an ordinary slow command still gets reported"
+        );
+        assert!(
+            payloads.iter().all(|v| {
+                v["params"]["title"]
+                    .as_str()
+                    .map(|t| !t.starts_with("🔒 "))
+                    .unwrap_or(true)
+            }),
+            "no report may carry the lock prefix for a non-keylock command"
+        );
     }
 }

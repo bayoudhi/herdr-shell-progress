@@ -40,3 +40,14 @@ success = "ok · {elapsed}"
 failure = "exit {code} · {elapsed}"
 signal  = "{signal} · {elapsed}"
 unknown = "{elapsed}"          # exit code unreadable: elapsed only, never "ok"
+
+[lock]
+prefix     = "🔒 "  # shown in front of the row while a keylock session is locked; "" turns it off
+timeout_ms = 300    # how long `keylock status` may take before the probe gives up (floor 50)
+
+# While a tracked command is `keylock` (github.com/bayoudhi/keylock), this
+# plugin asks `keylock status --pane $HERDR_PANE_ID` once per tick and marks the
+# row while the session is locked. Every other command spawns nothing, and a
+# missing or slow keylock only ever costs the row its lock, never its updates —
+# though a slow keylock does delay the row's own update by up to timeout_ms,
+# since the probe runs before that tick's report. Needs keylock 0.2.0 or newer.

@@ -51,6 +51,7 @@ pub fn report_agent(pane_id: &str, agent: &str, state: AgentState, message: Opti
 pub fn report_metadata(
     pane_id: &str,
     title: Option<String>,
+    cmd_token: Option<String>,
     label: Option<(&str, String)>,
     ttl_ms: Option<u64>,
     clear: bool,
@@ -60,7 +61,6 @@ pub fn report_metadata(
     map.insert("pane_id".into(), json!(pane_id));
     map.insert("source".into(), json!(SOURCE));
     map.insert("applies_to_source".into(), json!(SOURCE));
-    let title_text = title.clone();
     if let Some(title) = title {
         map.insert("title".into(), json!(title));
     }
@@ -72,12 +72,13 @@ pub fn report_metadata(
         map.insert("display_agent".into(), json!(display));
         let mut tokens = Map::new();
         // `$cmd` in a custom row means the same thing as `{cmd}` in a label
-        // template: the whole command line, cut only by `max_title_len`. The row
-        // name is the same line cut harder, so `$cmd` is what a custom row uses
-        // when it has more width to spend than the default row does.
+        // template: the whole command line, cut only by `max_title_len`, and
+        // never decorated — that is what `cmd_token` carries. It must never be
+        // derived from `title`: `title` is what the pane itself shows and may
+        // carry the lock prefix, and `$cmd`/`{cmd}` must not.
         tokens.insert(
             "cmd".into(),
-            json!(title_text.unwrap_or_else(|| display.to_string())),
+            json!(cmd_token.unwrap_or_else(|| display.to_string())),
         );
         map.insert("tokens".into(), Value::Object(tokens));
     }
@@ -151,6 +152,7 @@ mod tests {
         let v = report_metadata(
             "w1:p2",
             Some("cargo build".to_string()),
+            None,
             Some(("working", "running 12s".to_string())),
             None,
             false,
@@ -168,6 +170,7 @@ mod tests {
         let v = report_metadata(
             "w1:p2",
             None,
+            None,
             Some(("idle", "ok · 4s".to_string())),
             Some(20_000),
             false,
@@ -179,7 +182,7 @@ mod tests {
 
     #[test]
     fn report_metadata_clear_sets_both_clear_flags() {
-        let v = report_metadata("w1:p2", None, None, None, true, None);
+        let v = report_metadata("w1:p2", None, None, None, None, true, None);
         assert_eq!(v["clear_title"], true);
         assert_eq!(v["clear_state_labels"], true);
         assert!(v.get("state_labels").is_none());
@@ -191,6 +194,7 @@ mod tests {
         // `max_title_len`; nothing here re-derives one from the other.
         let v = report_metadata(
             "w1:p2",
+            Some("cargo build --release --features full".to_string()),
             Some("cargo build --release --features full".to_string()),
             None,
             None,
@@ -209,15 +213,40 @@ mod tests {
 
     #[test]
     fn the_cmd_token_falls_back_to_the_display_name_without_a_title() {
-        let v = report_metadata("w1:p2", None, None, None, false, Some("cargo"));
+        let v = report_metadata("w1:p2", None, None, None, None, false, Some("cargo"));
         assert_eq!(v["tokens"]["cmd"], "cargo");
     }
 
     #[test]
     fn display_agent_and_tokens_are_omitted_when_absent() {
-        let v = report_metadata("w1:p2", None, None, None, false, None);
+        let v = report_metadata("w1:p2", None, None, None, None, false, None);
         assert!(v.get("display_agent").is_none());
         assert!(v.get("tokens").is_none());
+    }
+
+    /// F1: a locked running report decorates the pane title and the row name,
+    /// but `$cmd` stays the raw command line. `$cmd` means what `{cmd}` means
+    /// in a label template — the whole command line cut only by
+    /// `max_title_len` — and the label template's `{cmd}` variable is
+    /// untouched by the lock, so the wire token that stands in for it must
+    /// stay untouched too.
+    #[test]
+    fn a_locked_reports_title_is_decorated_but_its_cmd_token_is_not() {
+        let v = report_metadata(
+            "w1:p2",
+            Some("🔒 keylock run -- ./m.sh".to_string()),
+            Some("keylock run -- ./m.sh".to_string()),
+            None,
+            None,
+            false,
+            Some("🔒 keylock run -- ./m.sh"),
+        );
+        assert_eq!(v["title"], "🔒 keylock run -- ./m.sh");
+        assert_eq!(v["display_agent"], "🔒 keylock run -- ./m.sh");
+        assert_eq!(
+            v["tokens"]["cmd"], "keylock run -- ./m.sh",
+            "$cmd must never carry the lock prefix"
+        );
     }
 
     #[test]

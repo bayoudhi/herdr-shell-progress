@@ -12,6 +12,10 @@ pub const MIN_INTERVAL_MS: u64 = 250;
 /// it. Eight characters is cramped but still identifies a command.
 pub const MIN_DISPLAY_LEN: usize = 8;
 
+/// Floor for the lock probe's timeout. Below this a slow `keylock status`
+/// would be killed before it could answer, so the row would never lock.
+pub const MIN_LOCK_TIMEOUT_MS: u64 = 50;
+
 fn default_threshold_ms() -> u64 {
     2000
 }
@@ -33,6 +37,14 @@ fn default_success_sticky_ms() -> u64 {
 }
 fn default_failure_sticky() -> bool {
     true
+}
+
+fn default_lock_prefix() -> String {
+    "🔒 ".to_string()
+}
+
+fn default_lock_timeout_ms() -> u64 {
+    300
 }
 
 /// The shells are not cosmetic: a nested shell re-sources `init.zsh` with the
@@ -107,6 +119,25 @@ impl Default for Finish {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+pub struct Lock {
+    /// Written in front of the row name while the session is locked. Empty
+    /// turns the indicator off, and with it the probe.
+    pub prefix: String,
+    /// How long `keylock status` may take before the probe gives up on it.
+    pub timeout_ms: u64,
+}
+
+impl Default for Lock {
+    fn default() -> Self {
+        Self {
+            prefix: default_lock_prefix(),
+            timeout_ms: default_lock_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub threshold_ms: u64,
     pub tick_ms: u64,
@@ -116,6 +147,7 @@ pub struct Config {
     pub ignore_extra: Vec<String>,
     pub finish: Finish,
     pub labels: Labels,
+    pub lock: Lock,
 }
 
 impl Default for Config {
@@ -129,6 +161,7 @@ impl Default for Config {
             ignore_extra: Vec::new(),
             finish: Finish::default(),
             labels: Labels::default(),
+            lock: Lock::default(),
         }
     }
 }
@@ -159,6 +192,15 @@ impl Config {
         self.tick_ms = self.tick_ms.max(MIN_INTERVAL_MS);
         self.threshold_ms = self.threshold_ms.max(MIN_INTERVAL_MS);
         self.max_display_len = self.max_display_len.max(MIN_DISPLAY_LEN);
+        // Ceiling is `tick_ms` (already clamped above, and always >=
+        // MIN_INTERVAL_MS > MIN_LOCK_TIMEOUT_MS, so the range is never empty):
+        // a probe timeout longer than the watcher's own wake interval would
+        // block a single tick for as long as the hostile value names, freezing
+        // the elapsed label and delaying the finish label for that long.
+        self.lock.timeout_ms = self
+            .lock
+            .timeout_ms
+            .clamp(MIN_LOCK_TIMEOUT_MS, self.tick_ms);
     }
 
     pub fn is_ignored(&self, agent: &str) -> bool {
@@ -410,6 +452,63 @@ mod tests {
         assert!(
             !cfg.is_ignored("claude"),
             "explicit ignore is a replacement"
+        );
+    }
+
+    #[test]
+    fn lock_defaults_and_overrides() {
+        let cfg = Config::load(None);
+        assert_eq!(cfg.lock.prefix, "🔒 ");
+        assert_eq!(cfg.lock.timeout_ms, 300);
+
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "[lock]\nprefix = \"L \"\ntimeout_ms = 1000\n");
+        let cfg = Config::load(Some(dir.path()));
+        assert_eq!(cfg.lock.prefix, "L ");
+        assert_eq!(cfg.lock.timeout_ms, 1000);
+    }
+
+    #[test]
+    fn an_empty_lock_prefix_is_an_off_switch_not_a_missing_value() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "[lock]\nprefix = \"\"\n");
+        let cfg = Config::load(Some(dir.path()));
+        assert_eq!(cfg.lock.prefix, "");
+        assert_eq!(cfg.lock.timeout_ms, 300, "other keys keep their defaults");
+    }
+
+    #[test]
+    fn a_tiny_lock_timeout_is_floored_so_the_probe_can_still_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "[lock]\ntimeout_ms = 5\n");
+        assert_eq!(
+            Config::load(Some(dir.path())).lock.timeout_ms,
+            MIN_LOCK_TIMEOUT_MS
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "[lock]\ntimeout_ms = 0\n");
+        assert_eq!(
+            Config::load(Some(dir.path())).lock.timeout_ms,
+            MIN_LOCK_TIMEOUT_MS
+        );
+    }
+
+    /// F2: `sanitize()`'s own doc comment promises hostile values are pulled
+    /// into a survivable range, but only the floor was ever applied. An hour-long
+    /// `timeout_ms` would block the single-threaded watcher for an hour per
+    /// tick, freezing the elapsed label and delaying the finish label — so it
+    /// must never exceed `tick_ms`, the interval the watcher is meant to wake up
+    /// on.
+    #[test]
+    fn an_excessive_lock_timeout_is_clamped_to_tick_ms() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "[lock]\ntimeout_ms = 3600000\n");
+        let cfg = Config::load(Some(dir.path()));
+        assert_eq!(cfg.tick_ms, 2000, "default tick_ms is unaffected");
+        assert_eq!(
+            cfg.lock.timeout_ms, cfg.tick_ms,
+            "an hour-long timeout must not block a single tick for an hour"
         );
     }
 }
