@@ -17,14 +17,26 @@ the recording, which slid the labels out of sync with the keys.
 
 import pathlib
 import sys
+from collections import Counter
 
 from PIL import Image, ImageDraw, ImageFont, ImageSequence
 
 FONT = "/System/Library/Fonts/Menlo.ttc"
 
+# The overlay's own colours: desaturated, so the bar sits next to the terminal
+# colours of demo/demo.gif rather than on top of them.
+DROPPED = (224, 108, 117)
+DELIVERED = (152, 195, 121)
+BOX_FILL = (30, 30, 38)
+BOX_EDGE = (68, 71, 90)
+KEY_TEXT = (220, 223, 228)
+KEY_LABEL = (120, 124, 138)
+
+# Colours in the shared palette. Larger keeps the terminal's gradients, and
+# costs file size: the GIF roughly doubles between 64 and 256.
+PALETTE_SIZE = 128
+
 # (start, end, key label, note, note colour)
-DROPPED = (214, 92, 92)
-DELIVERED = (126, 199, 126)
 EVENTS = [
     (8.1, 10.1, "a", "dropped - the session is locked", DROPPED),
     (10.1, 12.1, "space", "dropped - the session is locked", DROPPED),
@@ -51,12 +63,62 @@ def draw(frame: Image.Image, second: float) -> Image.Image:
     y = height - box_h - 40
 
     canvas.rounded_rectangle(
-        [x, y, x + box_w, y + box_h], radius=10, fill=(32, 32, 38), outline=(70, 70, 80)
+        [x, y, x + box_w, y + box_h], radius=10, fill=BOX_FILL, outline=BOX_EDGE
     )
-    canvas.text((x + 24, y + 14), "key:", font=note_font, fill=(150, 150, 160))
-    canvas.text((x + 24 + 52, y + 8), key, font=key_font, fill=(240, 240, 245))
+    canvas.text((x + 24, y + 14), "key:", font=note_font, fill=KEY_LABEL)
+    canvas.text((x + 24 + 52, y + 8), key, font=key_font, fill=KEY_TEXT)
     canvas.text((x + 24, y + 50), note, font=note_font, fill=colour)
     return frame
+
+
+def build_palette(frames: list[Image.Image]) -> Image.Image:
+    """One shared palette for the whole GIF.
+
+    Per-frame palettes cost several hundred KB, and a palette taken from a
+    single frame drops every colour that frame happens not to show — the first
+    cut of this overlay quantized the green notes to grey. Median cut also
+    moves the colours it keeps, and it shifted the terminal background off the
+    one demo/demo.gif uses, which is exactly the thing a reader compares.
+
+    So: median cut over a strip of frames spread across the recording for the
+    bulk of the palette, with the overlay's own colours written in verbatim at
+    the end. The background is pinned separately, after quantization.
+    """
+    picks = [frames[i * len(frames) // 8] for i in range(8)]
+    width, height = picks[0].size
+    strip = Image.new("RGB", (width, height * len(picks)))
+    for i, frame in enumerate(picks):
+        strip.paste(frame, (0, i * height))
+
+    exact = [BOX_FILL, BOX_EDGE, KEY_TEXT, KEY_LABEL, DROPPED, DELIVERED]
+    entries = strip.quantize(
+        colors=PALETTE_SIZE - len(exact), method=Image.MEDIANCUT
+    ).getpalette()[: 3 * (PALETTE_SIZE - len(exact))]
+    for colour in exact:
+        entries.extend(colour)
+
+    palette = Image.new("P", (1, 1))
+    palette.putpalette(entries + [0] * (768 - len(entries)))
+    return palette
+
+
+def pin_background(frames: list[Image.Image], paletted: list[Image.Image]) -> None:
+    """Give the terminal background back its exact colour.
+
+    Quantizing with a ready-made palette is not a nearest-colour search: even
+    with the background in the palette verbatim, PIL mapped it to a neighbour
+    two units away. Two units are invisible on their own, but demo/lock.gif
+    sits next to demo/demo.gif in the README, where the eye compares the two
+    backgrounds directly. Rewriting the one palette entry the background landed
+    on costs nothing and moves nothing else: every colour it covers is within
+    those two units.
+    """
+    background = Counter(frames[len(frames) // 2].get_flattened_data()).most_common(1)[0][0]
+    index = Counter(paletted[len(paletted) // 2].get_flattened_data()).most_common(1)[0][0]
+    entries = list(paletted[0].getpalette())
+    entries[3 * index : 3 * index + 3] = list(background)
+    for frame in paletted:
+        frame.putpalette(entries)
 
 
 def main(gif: pathlib.Path) -> int:
@@ -68,19 +130,9 @@ def main(gif: pathlib.Path) -> int:
             durations.append(delay)
             elapsed += delay
 
-    # One shared palette keeps the file small: per-frame palettes cost several
-    # hundred KB. It is built from a mid frame with a wide band of every note
-    # colour painted over it: a plain mid frame only ever carries one of them,
-    # and the missing colours came out grey. The bands have to be large — a
-    # few hundred pixels of a new colour do not survive median cut.
-    sample = frames[len(frames) // 2].copy()
-    swatch = ImageDraw.Draw(sample)
-    colours = sorted({e[4] for e in EVENTS})
-    band = sample.height // (2 * len(colours))
-    for i, colour in enumerate(colours):
-        swatch.rectangle([0, i * band, sample.width, (i + 1) * band], fill=colour)
-    palette = sample.quantize(colors=64, method=Image.MEDIANCUT)
+    palette = build_palette(frames)
     paletted = [f.quantize(palette=palette, dither=Image.Dither.NONE) for f in frames]
+    pin_background(frames, paletted)
 
     paletted[0].save(
         gif,
