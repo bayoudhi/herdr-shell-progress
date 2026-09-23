@@ -18,6 +18,7 @@ the recording, which slid the labels out of sync with the keys.
 import pathlib
 import sys
 from collections import Counter
+from typing import NamedTuple
 
 from PIL import Image, ImageDraw, ImageFont, ImageSequence
 
@@ -31,26 +32,79 @@ BOX_FILL = (30, 30, 38)
 BOX_EDGE = (68, 71, 90)
 KEY_TEXT = (220, 223, 228)
 KEY_LABEL = (120, 124, 138)
+KEY_PENDING = (78, 81, 96)
 
 # Colours in the shared palette. Larger keeps the terminal's gradients, and
 # costs file size: the GIF roughly doubles between 64 and 256.
 PALETTE_SIZE = 128
 
-# (start, end, key label, note, note colour)
+PHRASE = "unlock"
+PHRASE_START = 14.8
+PHRASE_INTERVAL = 0.3  # `Set TypingSpeed` around the phrase in demo/lock.tape
+PHRASE_NOTE = "the unlock phrase - taken, not passed on"
+
+
+class Event(NamedTuple):
+    """One label on the bar, shown from `start` until `end` seconds."""
+
+    start: float
+    end: float
+    key: str
+    note: str
+    colour: tuple[int, int, int]
+    typed: int | None = None  # letters of `key` entered so far, for the phrase
+
+
+def phrase_events(until: float) -> list[Event]:
+    """The phrase filling in, one letter per keystroke, then held.
+
+    keylock unlocks on the last letters typed rather than on a submitted line,
+    so the bar spells the phrase out as it fills instead of showing it whole:
+    the letters already typed are lit, the rest stay dim.
+    """
+    steps = [
+        Event(
+            PHRASE_START + i * PHRASE_INTERVAL,
+            PHRASE_START + (i + 1) * PHRASE_INTERVAL,
+            PHRASE,
+            PHRASE_NOTE,
+            DELIVERED,
+            typed=i + 1,
+        )
+        for i in range(len(PHRASE))
+    ]
+    return steps + [Event(steps[-1].end, until, PHRASE, PHRASE_NOTE, DELIVERED, len(PHRASE))]
+
+
+# Anchored to the render, not to the tape's arithmetic: the lock leaves the
+# sidebar row at 18.1s and the job prints its abort line at 20.7s.
 EVENTS = [
-    (8.1, 10.1, "a", "dropped - the session is locked", DROPPED),
-    (10.1, 12.1, "space", "dropped - the session is locked", DROPPED),
-    (12.1, 15.1, "ctrl+c", "dropped - the session is locked", DROPPED),
-    (15.1, 19.4, "u n l o c k", "the unlock phrase - taken, not passed on", DELIVERED),
-    (19.4, 24.0, "x", "reaches the job, which aborts", DELIVERED),
+    Event(7.8, 9.8, "a", "dropped - the session is locked", DROPPED),
+    Event(9.8, 11.8, "space", "dropped - the session is locked", DROPPED),
+    Event(11.8, 14.8, "ctrl+c", "dropped - the session is locked", DROPPED),
+    *phrase_events(until=20.6),
+    Event(20.6, 26.0, "x", "reaches the job, which aborts", DELIVERED),
 ]
 
 
+def draw_key(
+    canvas: ImageDraw.ImageDraw, at: tuple[int, int], font: ImageFont.FreeTypeFont, event: Event
+) -> None:
+    """The key itself: one label, or the phrase with the untyped tail dimmed."""
+    if event.typed is None:
+        canvas.text(at, event.key, font=font, fill=KEY_TEXT)
+        return
+
+    x, y = at
+    for i, letter in enumerate(event.key):
+        canvas.text((x, y), letter, font=font, fill=KEY_TEXT if i < event.typed else KEY_PENDING)
+        x += font.getlength(letter) + 10
+
+
 def draw(frame: Image.Image, second: float) -> Image.Image:
-    event = next((e for e in EVENTS if e[0] <= second < e[1]), None)
+    event = next((e for e in EVENTS if e.start <= second < e.end), None)
     if event is None:
         return frame
-    _, _, key, note, colour = event
 
     frame = frame.convert("RGB")
     canvas = ImageDraw.Draw(frame)
@@ -66,8 +120,8 @@ def draw(frame: Image.Image, second: float) -> Image.Image:
         [x, y, x + box_w, y + box_h], radius=10, fill=BOX_FILL, outline=BOX_EDGE
     )
     canvas.text((x + 24, y + 14), "key:", font=note_font, fill=KEY_LABEL)
-    canvas.text((x + 24 + 52, y + 8), key, font=key_font, fill=KEY_TEXT)
-    canvas.text((x + 24, y + 50), note, font=note_font, fill=colour)
+    draw_key(canvas, (x + 24 + 52, y + 8), key_font, event)
+    canvas.text((x + 24, y + 50), event.note, font=note_font, fill=event.colour)
     return frame
 
 
@@ -90,7 +144,7 @@ def build_palette(frames: list[Image.Image]) -> Image.Image:
     for i, frame in enumerate(picks):
         strip.paste(frame, (0, i * height))
 
-    exact = [BOX_FILL, BOX_EDGE, KEY_TEXT, KEY_LABEL, DROPPED, DELIVERED]
+    exact = [BOX_FILL, BOX_EDGE, KEY_TEXT, KEY_LABEL, KEY_PENDING, DROPPED, DELIVERED]
     entries = strip.quantize(
         colors=PALETTE_SIZE - len(exact), method=Image.MEDIANCUT
     ).getpalette()[: 3 * (PALETTE_SIZE - len(exact))]

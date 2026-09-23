@@ -100,7 +100,14 @@ Ctrl+C
 Sleep 3s
 
 # The phrase unlocks the session; the lock leaves the row within a tick.
+#
+# Typed slowly on purpose. keylock unlocks on the last six keys typed, so the
+# phrase is a rolling window rather than a line, and the overlay spells it out
+# letter by letter as it fills. At the default 50ms that whole reveal would
+# last a third of a second — one frame and a half.
+Set TypingSpeed 300ms
 Type "unlock"
+Set TypingSpeed 50ms
 Sleep 4s
 
 # Unlocked: the next key reaches the job, which aborts.
