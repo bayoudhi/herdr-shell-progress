@@ -14,6 +14,8 @@ sidebar as `sleep 6 · running 4s`, then settles into `sleep 6 · ok · 6s`.*
 - Fast commands are invisible — nothing flickers when you run `ls`.
 - Failures stick until your next command, so you see what broke while away.
 - Successes clear themselves after 20 seconds by default.
+- A [keylock](https://github.com/bayoudhi/keylock) session that is locked
+  wears a 🔒 while it runs, so you can see the pane is protected.
 - Zero socket traffic and zero output for commands under the threshold — with
   one exception: the first command after a sticky failure label spends two
   requests wiping it, however fast that command is.
@@ -21,12 +23,23 @@ sidebar as `sleep 6 · running 4s`, then settles into `sleep 6 · ok · 6s`.*
 ## keylock sessions
 
 [keylock](https://github.com/bayoudhi/keylock) runs a command behind an input
-lock, so a stray Ctrl+C can't kill a long migration. While a tracked command is
-`keylock` and its session is locked, the row wears the lock:
+lock: while the session is locked it drops every key, so a stray Space or
+Ctrl+C cannot interrupt a long migration. Nothing in Herdr's own chrome shows
+that a pane is locked. This plugin already owns that sidebar row, so it shows
+it here.
+
+While a tracked command is `keylock` and its session is locked, the row wears
+the lock:
 
 ```
 🔒 keylock run -- ./migrate.sh · running 4m12s
 ```
+
+![keylock demo](demo/lock.gif)
+
+*A locked `sleep 25`: typing does nothing, not even Ctrl+C, and the row shows
+🔒. Typing the unlock phrase clears the lock within a tick, after which
+Ctrl+C reaches the command and ends it.*
 
 The check runs once per tick, only for `keylock` commands, and asks keylock
 itself (`keylock status --pane`) rather than guessing from the command line.
