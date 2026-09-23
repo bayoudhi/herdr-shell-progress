@@ -37,9 +37,10 @@ the lock:
 
 ![keylock demo](demo/lock.gif)
 
-*A locked `sleep 25`: typing does nothing, not even Ctrl+C, and the row shows
-🔒. Typing the unlock phrase clears the lock within a tick, after which
-Ctrl+C reaches the command and ends it.*
+*The job aborts on any keypress, so the counter running on is the proof: while
+the session is locked every key is dropped and the row wears 🔒. The unlock
+phrase clears the lock within a tick, and the next key then reaches the job,
+which aborts as it would have all along.*
 
 The check runs once per tick, only for `keylock` commands, and asks keylock
 itself (`keylock status --pane`) rather than guessing from the command line.

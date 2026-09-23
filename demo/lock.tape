@@ -31,9 +31,9 @@
 Output demo/lock.gif
 
 Set Shell zsh
-Set FontSize 15
-Set Width 1100
-Set Height 600
+Set FontSize 13
+Set Width 1500
+Set Height 640
 Set Padding 15
 Set Framerate 12
 Set PlaybackSpeed 1.0
@@ -43,33 +43,64 @@ Set PlaybackSpeed 1.0
 # Herdr refuses to launch nested. The PATH prefix is there because vhs spawns
 # a non-login shell, which on macOS may not have Homebrew's bin on PATH.
 Hide
-Type "env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH PATH=/opt/homebrew/bin:/usr/local/bin:$PATH ${=HSP_DEMO_ENV} herdr --session lockdemo"
+# Record from a scratch directory, not the repo: a neutral workspace name keeps
+# branch names and other plugins' rows (PR counts and the like) out of the GIF.
+# The demo config narrows the row name so the elapsed label always fits the
+# sidebar: Herdr's sidebar is a fixed ~26 columns, so the demo shortens both
+# the row name and the running label, and the pane still shows the whole
+# command. With the stock config the row reads `keylock run -- ./m\u2026 \u00b7 running 16s`
+# and Herdr clips the tail.
+Type "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH"
 Enter
-Sleep 6s
+# A session of this name from an earlier render would be REUSED, directory and
+# all, so the cd below would have no effect. Start from nothing every time.
+Type "herdr session stop lockdemo >/dev/null 2>&1; herdr session delete lockdemo >/dev/null 2>&1"
+Enter
+Type "rm -rf /tmp/keylock-lock-demo-session && mkdir -p /tmp/keylock-lock-demo-session"
+Enter
+Type "echo 'max_display_len = 8' > /tmp/keylock-lock-demo-session/config.toml"
+Enter
+Type "echo '[labels]' >> /tmp/keylock-lock-demo-session/config.toml"
+Enter
+# vhs cannot carry escaped double quotes through a Type string, so the label
+# uses TOML's single-quoted form.
+Type "echo 'running = '\''{elapsed}'\''' >> /tmp/keylock-lock-demo-session/config.toml"
+Enter
+Type "cp demo/migrate-sim.sh /tmp/keylock-lock-demo-session/ && cd /tmp/keylock-lock-demo-session"
+Enter
+Sleep 2s
+Type "env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH HERDR_PLUGIN_CONFIG_DIR=/tmp/keylock-lock-demo-session ${=HSP_DEMO_ENV} herdr --session lockdemo"
+Enter
+Sleep 7s
 
 Type "clear"
 Enter
 Sleep 1s
 Show
 
-# A locked keylock session: every key is dropped, so the command cannot be
-# interrupted. The sidebar row wears the lock while it is locked.
-Type "keylock run --locked -- sleep 25"
+# A locked keylock session. demo/migrate-sim.sh aborts the moment it reads a
+# key, so the counter running on is proof that nothing reached it.
+Type "keylock run --locked -- ./migrate-sim.sh"
 Enter
-Sleep 6s
+Sleep 7s
 
-# Typing does nothing at all — not even Ctrl+C reaches the command.
-Type "these keys go nowhere"
-Sleep 2s
+# Type at it. Every key is dropped — the job keeps counting, and keylock
+# answers each keystroke by flashing the lock in the pane title.
+Type "space"
+Sleep 1s
+Type " and any other key would abort this"
+Sleep 3s
 Ctrl+C
 Sleep 4s
 
-# The phrase unlocks it, and the lock leaves the row within a tick.
+# The phrase unlocks the session. The lock leaves the sidebar row within a
+# tick, and the job is still running.
 Type "unlock"
 Sleep 5s
 
-# Unlocked again: Ctrl+C now reaches the command and ends it.
-Ctrl+C
+# Unlocked: the very next key reaches the job, which aborts as it would have
+# all along.
+Type "x"
 Sleep 5s
 
 # Tear the demo session down with `prefix+q`. The prefix is ctrl+b out of the
