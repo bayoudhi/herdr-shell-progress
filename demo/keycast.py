@@ -38,10 +38,12 @@ KEY_PENDING = (78, 81, 96)
 # costs file size: the GIF roughly doubles between 64 and 256.
 PALETTE_SIZE = 128
 
+LOCKED_NOTE = "dropped - the session is locked"
+
 PHRASE = "unlock"
 PHRASE_START = 14.8
 PHRASE_INTERVAL = 0.3  # `Set TypingSpeed` around the phrase in demo/lock.tape
-PHRASE_NOTE = "the unlock phrase - taken, not passed on"
+PHRASE_NOTE = "completes the phrase - taken, not passed on"
 
 
 class Event(NamedTuple):
@@ -61,14 +63,19 @@ def phrase_events(until: float) -> list[Event]:
     keylock unlocks on the last letters typed rather than on a submitted line,
     so the bar spells the phrase out as it fills instead of showing it whole:
     the letters already typed are lit, the rest stay dim.
+
+    Every letter but the last is dropped like any other key — that is what the
+    rolling window means, and it is the part a reader gets wrong when the whole
+    phrase appears at once. Only the letter that completes it unlocks.
     """
+    last = len(PHRASE) - 1
     steps = [
         Event(
             PHRASE_START + i * PHRASE_INTERVAL,
             PHRASE_START + (i + 1) * PHRASE_INTERVAL,
             PHRASE,
-            PHRASE_NOTE,
-            DELIVERED,
+            PHRASE_NOTE if i == last else LOCKED_NOTE,
+            DELIVERED if i == last else DROPPED,
             typed=i + 1,
         )
         for i in range(len(PHRASE))
@@ -79,9 +86,9 @@ def phrase_events(until: float) -> list[Event]:
 # Anchored to the render, not to the tape's arithmetic: the lock leaves the
 # sidebar row at 18.1s and the job prints its abort line at 20.7s.
 EVENTS = [
-    Event(7.8, 9.8, "a", "dropped - the session is locked", DROPPED),
-    Event(9.8, 11.8, "space", "dropped - the session is locked", DROPPED),
-    Event(11.8, 14.8, "ctrl+c", "dropped - the session is locked", DROPPED),
+    Event(7.8, 9.8, "a", LOCKED_NOTE, DROPPED),
+    Event(9.8, 11.8, "space", LOCKED_NOTE, DROPPED),
+    Event(11.8, 14.8, "ctrl+c", LOCKED_NOTE, DROPPED),
     *phrase_events(until=20.6),
     Event(20.6, 26.0, "x", "reaches the job, which aborts", DELIVERED),
 ]
@@ -112,7 +119,10 @@ def draw(frame: Image.Image, second: float) -> Image.Image:
     note_font = ImageFont.truetype(FONT, 18)
 
     width, height = frame.size
-    box_w, box_h = 520, 84
+    # One width for every label, wide enough for the longest note: a box that
+    # resized per event would jump around under the pane.
+    box_w = max(520, round(max(note_font.getlength(e.note) for e in EVENTS)) + 48)
+    box_h = 84
     x = (width - box_w) // 2
     y = height - box_h - 40
 
