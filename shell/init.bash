@@ -2,7 +2,21 @@
 # Source this from .bashrc. Safe to source outside Herdr: it returns
 # immediately. Written for bash 3.2, the version macOS still ships.
 
-[[ -n "$HERDR_PANE_ID" ]] || return 0
+# Herdr's TUI gives each pane HERDR_PANE_ID and takes reports over its socket.
+# The desktop app gives each terminal HC_TERMINAL_ID and takes them as OSC 7501
+# sequences written into the terminal. The TUI wins when both are set: that is
+# a Herdr pane inside an app terminal, and the pane is where the command runs.
+if [[ -n "$HERDR_PANE_ID" ]]; then
+  _HSP_PANE="$HERDR_PANE_ID"
+  _HSP_KEY="${HERDR_PANE_ID//:/-}"
+  _HSP_OSC=0
+elif [[ -n "$HC_TERMINAL_ID" ]]; then
+  _HSP_PANE="$HC_TERMINAL_ID"
+  _HSP_KEY="hc-${HC_TERMINAL_ID//:/-}"
+  _HSP_OSC=1
+else
+  return 0
+fi
 
 # Locate the binary relative to this file unless the user pinned one.
 if [[ -z "$HSP_BIN" ]]; then
@@ -10,7 +24,7 @@ if [[ -z "$HSP_BIN" ]]; then
 fi
 [[ -x "$HSP_BIN" ]] || return 0
 
-_HSP_STATE_DIR="${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-shell-progress}/${HERDR_PANE_ID//:/-}"
+_HSP_STATE_DIR="${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-shell-progress}/$_HSP_KEY"
 _HSP_PID=0
 _HSP_LAST_STATUS=0
 # The DEBUG trap fires before every simple command, including each element of a
@@ -79,14 +93,31 @@ _hsp_preexec() {
   local clear=""
   [[ -f "$_HSP_STATE_DIR/marker" ]] && clear="--clear-first"
 
+  local backend=""
+  if [[ "$_HSP_OSC" == 1 ]]; then
+    backend="--osc"
+    # The desktop app keeps a finished command's record until it is cleared.
+    # Clear it here, while the shell still owns the terminal and nothing else
+    # is writing to it, and only when there is one: an ordinary command costs
+    # no output at all.
+    if [[ -s "$_HSP_STATE_DIR/osc-shown" ]]; then
+      printf '\033]7501;state=clear\033\\' 2>/dev/null >/dev/tty
+      : >| "$_HSP_STATE_DIR/osc-shown"
+    fi
+    # The watcher reads a non-empty `exit` as "this command is already over",
+    # and a report it never got to finish belongs to some earlier command.
+    : >| "$_HSP_STATE_DIR/exit"
+    : >| "$_HSP_STATE_DIR/osc-start"
+  fi
+
   # bash gained EPOCHREALTIME in 5.0, and macOS still ships 3.2, so the watcher
   # reads its own clock.
   "$HSP_BIN" watch \
-    --pane "$HERDR_PANE_ID" \
+    --pane "$_HSP_PANE" \
     --shell-pid $$ \
     --start-now \
     --state-dir "$_HSP_STATE_DIR" \
-    $clear >/dev/null 2>&1 &
+    $clear $backend >/dev/null 2>&1 &
   _HSP_PID=$!
   disown $_HSP_PID 2>/dev/null
 }
@@ -100,12 +131,21 @@ _hsp_capture_status() {
 # PROMPT_COMMAND entry can consume the arm before the user's next command does.
 _hsp_precmd() {
   if [[ "$_HSP_PID" != 0 ]]; then
-    printf '%s\n' "$_HSP_LAST_STATUS" > "$_HSP_STATE_DIR/exit"
+    printf '%s\n' "$_HSP_LAST_STATUS" >| "$_HSP_STATE_DIR/exit"
     kill -USR1 "$_HSP_PID" 2>/dev/null
     # Forget the PID immediately. The watcher may live on (a successful command
     # keeps its label up for a while) but it is no longer ours to signal, and
     # the PID becomes reusable by the OS the moment it does exit.
     _HSP_PID=0
+    # The desktop app's final report is written from here, in the foreground:
+    # the command is over and the prompt not yet drawn, so nothing else is
+    # writing to the terminal. `osc-start` exists only if the watcher reported
+    # this command, so a fast one costs no fork. It must be tested after `exit`
+    # is written — see `osc_watch.rs` for the race that ordering settles.
+    if [[ "$_HSP_OSC" == 1 && -s "$_HSP_STATE_DIR/osc-start" ]]; then
+      "$HSP_BIN" finish --state-dir "$_HSP_STATE_DIR" \
+        --exit "$_HSP_LAST_STATUS" >/dev/null 2>&1
+    fi
   fi
   _HSP_ARMED=1
 }

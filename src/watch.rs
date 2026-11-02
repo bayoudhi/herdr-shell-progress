@@ -1,6 +1,7 @@
-use crate::args::{Args, Start};
+use crate::args::{Args, FinishArgs, Start};
 use crate::command;
 use crate::config::Config;
+use crate::osc_watch;
 use crate::proto;
 use crate::socket::{self, SendError};
 use crate::state::{self, Action, Machine};
@@ -217,7 +218,7 @@ fn linger(
 /// may be minutes later; a watcher that exited early leaves the shell holding a
 /// PID the OS is free to hand to somebody else, and SIGUSR1's default
 /// disposition is to terminate whoever receives it.
-fn park(rx: &Receiver<i32>, poll_ms: u64, alive: &dyn Fn() -> bool) -> i32 {
+pub(crate) fn park(rx: &Receiver<i32>, poll_ms: u64, alive: &dyn Fn() -> bool) -> i32 {
     let poll = Duration::from_millis(poll_ms.max(1));
     loop {
         match rx.recv_timeout(poll) {
@@ -491,6 +492,13 @@ pub fn run(args: Args) -> i32 {
     run_with(args, Overrides::from_env())
 }
 
+/// The desktop app's final report, written from the shell's pre-prompt hook.
+pub fn finish(args: FinishArgs) -> i32 {
+    let cfg = Config::load(config_dir().as_deref());
+    osc_watch::finish(&args, &cfg, now_ms(), &mut osc_watch::Tty);
+    0
+}
+
 fn run_with(args: Args, overrides: Overrides) -> i32 {
     // Read the clock before anything else: a shell that passed `--start-now`
     // has no start of its own, so every millisecond spent below would otherwise
@@ -537,6 +545,28 @@ fn run_with(args: Args, overrides: Overrides) -> i32 {
             }
         }
     });
+
+    // The desktop app: no socket, no marker, no ticking. See `osc_watch`. The
+    // sticky record a previous command left is cleared by the shell itself.
+    if args.osc {
+        if cfg.is_ignored(&agent) {
+            return park(&rx, tick_ms, &|| shell_alive(args.shell_pid));
+        }
+        let tracked = osc_watch::Tracked {
+            state_dir: &args.state_dir,
+            start_ms,
+            agent: &agent,
+            title: &title,
+        };
+        return osc_watch::watch(
+            &rx,
+            &cfg,
+            &tracked,
+            &now_ms,
+            &|| shell_alive(args.shell_pid),
+            &mut osc_watch::Tty,
+        );
+    }
 
     // Clear a sticky label from the previous command before anything else, even
     // for an ignored command — otherwise a stale label would outlive its welcome.
@@ -1339,6 +1369,7 @@ mod tests {
             start: Start::At(now_ms().saturating_sub(5_000)),
             state_dir: state_dir.to_path_buf(),
             clear_first: false,
+            osc: false,
         }
     }
 

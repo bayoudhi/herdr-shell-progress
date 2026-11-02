@@ -82,20 +82,7 @@ impl Machine {
     }
 
     fn finish_label(&self, outcome: Outcome, elapsed: u64) -> String {
-        let (template, code, signal) = match outcome {
-            Outcome::Success => (&self.cfg.labels.success, String::new(), String::new()),
-            Outcome::Failure(c) => (&self.cfg.labels.failure, c.to_string(), String::new()),
-            Outcome::Signal(name) => (&self.cfg.labels.signal, String::new(), name.to_string()),
-            Outcome::Unknown => (&self.cfg.labels.unknown, String::new(), String::new()),
-        };
-        let vars = vec![
-            ("elapsed", label::format_elapsed(elapsed)),
-            ("code", code),
-            ("signal", signal),
-            ("cmd", self.title.clone()),
-            ("agent", self.agent.clone()),
-        ];
-        label::render(template, &vars)
+        finish_label(&self.cfg, outcome, elapsed, &self.title, &self.agent)
     }
 
     /// How long the driver should wait before calling `on_tick` again.
@@ -266,6 +253,31 @@ impl Machine {
             Action::Exit,
         ]
     }
+}
+
+/// The label a finished command leaves behind. Shared by the socket watcher and
+/// the desktop app's `finish`, so a template means the same thing in both.
+pub fn finish_label(
+    cfg: &Config,
+    outcome: Outcome,
+    elapsed: u64,
+    cmd: &str,
+    agent: &str,
+) -> String {
+    let (template, code, signal) = match outcome {
+        Outcome::Success => (&cfg.labels.success, String::new(), String::new()),
+        Outcome::Failure(c) => (&cfg.labels.failure, c.to_string(), String::new()),
+        Outcome::Signal(name) => (&cfg.labels.signal, String::new(), name.to_string()),
+        Outcome::Unknown => (&cfg.labels.unknown, String::new(), String::new()),
+    };
+    let vars = vec![
+        ("elapsed", label::format_elapsed(elapsed)),
+        ("code", code),
+        ("signal", signal),
+        ("cmd", cmd.to_string()),
+        ("agent", agent.to_string()),
+    ];
+    label::render(template, &vars)
 }
 
 /// Wipes a sticky label left by a previous command. `prev_agent` comes from the

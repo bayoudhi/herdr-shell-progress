@@ -45,12 +45,31 @@ for a in "$@"; do
   [ "$prev" = "--state-dir" ] && state="$a"
   prev="$a"
 done
+# The desktop app's `finish` runs in the foreground: record it, consume
+# `osc-start` as the real one does, and get out of the prompt's way.
+if [ "$1" = finish ]; then
+  shift
+  printf 'finish %s\n' "$*" >> "$HSP_TEST_LOG"
+  rm -f "$state/osc-start"
+  exit 0
+fi
 trap 'printf "signal %s\n" "$(cat "$state/exit" 2>/dev/null)" >> "$HSP_TEST_LOG"; exit 0' USR1
 {
   printf 'spawn %s\n' "$*"
   printf 'cmd %s\n' "$(cat "$state/cmd" 2>/dev/null)"
   if [ -f "$state/name" ]; then printf 'name %s\n' "$(cat "$state/name")"; fi
 } >> "$HSP_TEST_LOG"
+# Plays a desktop-app watcher whose command crossed the threshold, for commands
+# containing $HSP_STUB_REPORT: the readiness probe must never count.
+case " $* " in
+  *" --osc "*)
+    if [ -n "$HSP_STUB_REPORT" ]; then
+      case "$(cat "$state/cmd" 2>/dev/null)" in
+        *"$HSP_STUB_REPORT"*) printf '1000\nsleep\n' > "$state/osc-start" ;;
+      esac
+    fi
+    ;;
+esac
 i=0
 while [ $i -lt 12 ]; do sleep 0.1; i=$((i + 1)); done
 "#;
@@ -133,8 +152,52 @@ impl Spawn {
 
 struct Session {
     spawns: Vec<Spawn>,
+    /// The argv of every `finish` the pre-prompt hook ran, minus the word.
+    finishes: Vec<String>,
     state_dir: PathBuf,
     _home: tempfile::TempDir,
+}
+
+/// Which Herdr the shell believes it runs in, by the variables it is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Host {
+    /// The TUI: `HERDR_PANE_ID`.
+    Tui,
+    /// The desktop app: `HC_TERMINAL_ID`.
+    App,
+    /// A Herdr pane inside an app terminal: both.
+    Both,
+    /// Neither: not Herdr at all.
+    Outside,
+}
+
+impl Host {
+    /// The state directory's last component, as the hooks compute it.
+    fn key(self) -> &'static str {
+        match self {
+            Host::App => "hc-t5",
+            _ => "t1-p1",
+        }
+    }
+}
+
+/// Everything a session can vary beyond the shell and what is typed.
+struct Opts<'a> {
+    host: Host,
+    prelude: &'a str,
+    /// Makes the stub play a desktop-app watcher that reported commands
+    /// containing this text.
+    report: Option<&'a str>,
+}
+
+impl Default for Opts<'_> {
+    fn default() -> Self {
+        Opts {
+            host: Host::Tui,
+            prelude: "",
+            report: None,
+        }
+    }
 }
 
 /// Runs `commands` in an interactive `shell` and returns what the hook did.
@@ -153,6 +216,19 @@ fn run_with_prelude(
     prelude: &str,
     before: impl FnOnce(&Path),
 ) -> Session {
+    run_opts(
+        shell,
+        commands,
+        Opts {
+            prelude,
+            ..Opts::default()
+        },
+        before,
+    )
+}
+
+fn run_opts(shell: Shell, commands: &[&str], opts: Opts, before: impl FnOnce(&Path)) -> Session {
+    let prelude = opts.prelude;
     // A test that panicked while holding the lock has nothing to corrupt here:
     // every session owns a fresh temporary directory.
     let _guard = SESSION.lock().unwrap_or_else(|e| e.into_inner());
@@ -176,10 +252,11 @@ fn run_with_prelude(
     make_executable(&stub);
 
     // Mirrors what the hooks compute: HERDR_PLUGIN_STATE_DIR plus the pane id
-    // with its colons flattened.
+    // with its colons flattened, or the app terminal's id behind `hc-`.
     let pane = "t1:p1";
+    let terminal = "t5";
     let state_root = home.path().join("state");
-    let state_dir = state_root.join(pane.replace(':', "-"));
+    let state_dir = state_root.join(opts.host.key());
     std::fs::create_dir_all(&state_dir).unwrap();
     before(&state_dir);
 
@@ -188,11 +265,24 @@ fn run_with_prelude(
     std::fs::write(home.path().join(".zshrc"), &rc).unwrap();
     std::fs::write(home.path().join("bashrc"), &rc).unwrap();
 
-    let mut child = pty_command(shell, home.path(), &init)
+    let mut command = pty_command(shell, home.path(), &init);
+    // Never inherited: the suite may itself be running inside either Herdr.
+    command
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HC_TERMINAL_ID");
+    if matches!(opts.host, Host::Tui | Host::Both) {
+        command.env("HERDR_PANE_ID", pane);
+    }
+    if matches!(opts.host, Host::App | Host::Both) {
+        command.env("HC_TERMINAL_ID", terminal);
+    }
+    if let Some(report) = opts.report {
+        command.env("HSP_STUB_REPORT", report);
+    }
+    let mut child = command
         .env("HOME", home.path())
         .env("ZDOTDIR", home.path())
         .env("XDG_CONFIG_HOME", home.path().join("empty-config"))
-        .env("HERDR_PANE_ID", pane)
         .env("HERDR_PLUGIN_STATE_DIR", &state_root)
         .env("HSP_BIN", &stub)
         .env("HSP_TEST_LOG", &log)
@@ -235,8 +325,14 @@ fn run_with_prelude(
     child.wait().unwrap();
     settle(&log);
 
+    let text = std::fs::read_to_string(&log).unwrap();
     Session {
-        spawns: parse_log(&std::fs::read_to_string(&log).unwrap()),
+        spawns: parse_log(&text),
+        finishes: text
+            .lines()
+            .filter_map(|l| l.strip_prefix("finish "))
+            .map(str::to_string)
+            .collect(),
         state_dir,
         _home: home,
     }
@@ -459,6 +555,137 @@ fn clear_first_is_passed_only_when_a_marker_exists(shell: Shell) {
     );
 }
 
+// ---- the desktop app --------------------------------------------------------
+
+fn app(report: Option<&str>) -> Opts<'_> {
+    Opts {
+        host: Host::App,
+        report,
+        ..Opts::default()
+    }
+}
+
+fn an_app_terminal_gets_a_watcher_that_writes_osc(shell: Shell) {
+    if skip_unless_installed(shell) {
+        return;
+    }
+    let session = run_opts(shell, &[SLOW], app(None), |_| {});
+    let spawns = tracked(&session);
+
+    assert_eq!(spawns.len(), 1, "{spawns:#?}");
+    let argv = &spawns[0].argv;
+    assert!(
+        argv.split_whitespace().any(|a| a == "--osc"),
+        "the app has no socket to report to: {argv}"
+    );
+    assert!(argv.contains("--pane t5"), "{argv}");
+    assert!(
+        argv.contains(&format!("--state-dir {}", session.state_dir.display())),
+        "one state directory per app terminal: {argv}"
+    );
+    assert!(
+        session.state_dir.ends_with("hc-t5"),
+        "{}",
+        session.state_dir.display()
+    );
+}
+
+fn the_app_finish_runs_after_a_reported_command_only(shell: Shell) {
+    if skip_unless_installed(shell) {
+        return;
+    }
+    let reported = run_opts(
+        shell,
+        &[&format!("{SLOW}; false")],
+        app(Some("sleep")),
+        |_| {},
+    );
+    assert_eq!(
+        reported.finishes.len(),
+        1,
+        "the final report is written once, by the hook: {:#?}",
+        reported.finishes
+    );
+    let argv = &reported.finishes[0];
+    assert!(argv.contains("--exit 1"), "{argv}");
+    assert!(
+        argv.contains(&format!("--state-dir {}", reported.state_dir.display())),
+        "{argv}"
+    );
+
+    let fast = run_opts(shell, &[SLOW], app(None), |_| {});
+    assert_eq!(tracked(&fast).len(), 1, "the watcher still ran");
+    assert!(
+        fast.finishes.is_empty(),
+        "a command the watcher never reported costs no fork: {:#?}",
+        fast.finishes
+    );
+}
+
+fn the_app_record_from_the_last_command_is_cleared_first(shell: Shell) {
+    if skip_unless_installed(shell) {
+        return;
+    }
+    let session = run_opts(shell, &[SLOW], app(None), |state| {
+        std::fs::write(state.join("osc-shown"), "1\n").unwrap();
+    });
+    assert_eq!(tracked(&session).len(), 1);
+    let shown = std::fs::read_to_string(session.state_dir.join("osc-shown")).unwrap();
+    assert!(
+        shown.trim().is_empty(),
+        "the hook clears the record and says so: {shown:?}"
+    );
+}
+
+/// An `osc-start` the last `finish` never consumed must not make this command —
+/// fast, never reported — finish the old one with its own exit code.
+fn a_stale_report_from_an_earlier_command_is_not_finished(shell: Shell) {
+    if skip_unless_installed(shell) {
+        return;
+    }
+    let session = run_opts(shell, &[SLOW], app(None), |state| {
+        std::fs::write(state.join("osc-start"), "1000\nsleep\n").unwrap();
+    });
+    assert_eq!(tracked(&session).len(), 1);
+    assert!(session.finishes.is_empty(), "{:#?}", session.finishes);
+}
+
+fn outside_herdr_the_hook_does_nothing(shell: Shell) {
+    if skip_unless_installed(shell) {
+        return;
+    }
+    let session = run_opts(
+        shell,
+        &[SLOW],
+        Opts {
+            host: Host::Outside,
+            ..Opts::default()
+        },
+        |_| {},
+    );
+    assert!(session.spawns.is_empty(), "{:#?}", session.spawns);
+}
+
+fn a_tui_pane_inside_an_app_terminal_reports_to_the_tui(shell: Shell) {
+    if skip_unless_installed(shell) {
+        return;
+    }
+    let session = run_opts(
+        shell,
+        &[SLOW],
+        Opts {
+            host: Host::Both,
+            ..Opts::default()
+        },
+        |_| {},
+    );
+    let spawns = tracked(&session);
+    assert_eq!(spawns.len(), 1, "{spawns:#?}");
+    let argv = &spawns[0].argv;
+    assert!(!argv.contains("--osc"), "{argv}");
+    assert!(argv.contains("--pane t1:p1"), "{argv}");
+}
+
 mod zsh {
     use super::*;
 
@@ -485,6 +712,36 @@ mod zsh {
     #[test]
     fn clears_a_sticky_label_only_when_one_exists() {
         clear_first_is_passed_only_when_a_marker_exists(Shell::Zsh);
+    }
+
+    #[test]
+    fn writes_osc_in_an_app_terminal() {
+        an_app_terminal_gets_a_watcher_that_writes_osc(Shell::Zsh);
+    }
+
+    #[test]
+    fn finishes_a_reported_app_command_in_the_foreground() {
+        the_app_finish_runs_after_a_reported_command_only(Shell::Zsh);
+    }
+
+    #[test]
+    fn clears_the_previous_app_record_before_a_command() {
+        the_app_record_from_the_last_command_is_cleared_first(Shell::Zsh);
+    }
+
+    #[test]
+    fn never_finishes_a_stale_app_report() {
+        a_stale_report_from_an_earlier_command_is_not_finished(Shell::Zsh);
+    }
+
+    #[test]
+    fn does_nothing_outside_herdr() {
+        outside_herdr_the_hook_does_nothing(Shell::Zsh);
+    }
+
+    #[test]
+    fn prefers_the_tui_when_both_are_present() {
+        a_tui_pane_inside_an_app_terminal_reports_to_the_tui(Shell::Zsh);
     }
 }
 
@@ -514,6 +771,36 @@ mod bash {
     #[test]
     fn clears_a_sticky_label_only_when_one_exists() {
         clear_first_is_passed_only_when_a_marker_exists(Shell::Bash);
+    }
+
+    #[test]
+    fn writes_osc_in_an_app_terminal() {
+        an_app_terminal_gets_a_watcher_that_writes_osc(Shell::Bash);
+    }
+
+    #[test]
+    fn finishes_a_reported_app_command_in_the_foreground() {
+        the_app_finish_runs_after_a_reported_command_only(Shell::Bash);
+    }
+
+    #[test]
+    fn clears_the_previous_app_record_before_a_command() {
+        the_app_record_from_the_last_command_is_cleared_first(Shell::Bash);
+    }
+
+    #[test]
+    fn never_finishes_a_stale_app_report() {
+        a_stale_report_from_an_earlier_command_is_not_finished(Shell::Bash);
+    }
+
+    #[test]
+    fn does_nothing_outside_herdr() {
+        outside_herdr_the_hook_does_nothing(Shell::Bash);
+    }
+
+    #[test]
+    fn prefers_the_tui_when_both_are_present() {
+        a_tui_pane_inside_an_app_terminal_reports_to_the_tui(Shell::Bash);
     }
 
     /// bash is the only shell that writes a `name`: it cannot get the whole
@@ -653,5 +940,35 @@ mod fish {
     #[test]
     fn clears_a_sticky_label_only_when_one_exists() {
         clear_first_is_passed_only_when_a_marker_exists(Shell::Fish);
+    }
+
+    #[test]
+    fn writes_osc_in_an_app_terminal() {
+        an_app_terminal_gets_a_watcher_that_writes_osc(Shell::Fish);
+    }
+
+    #[test]
+    fn finishes_a_reported_app_command_in_the_foreground() {
+        the_app_finish_runs_after_a_reported_command_only(Shell::Fish);
+    }
+
+    #[test]
+    fn clears_the_previous_app_record_before_a_command() {
+        the_app_record_from_the_last_command_is_cleared_first(Shell::Fish);
+    }
+
+    #[test]
+    fn never_finishes_a_stale_app_report() {
+        a_stale_report_from_an_earlier_command_is_not_finished(Shell::Fish);
+    }
+
+    #[test]
+    fn does_nothing_outside_herdr() {
+        outside_herdr_the_hook_does_nothing(Shell::Fish);
+    }
+
+    #[test]
+    fn prefers_the_tui_when_both_are_present() {
+        a_tui_pane_inside_an_app_terminal_reports_to_the_tui(Shell::Fish);
     }
 }
