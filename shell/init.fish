@@ -2,7 +2,22 @@
 # Source this from config.fish. Safe to source outside Herdr: it returns
 # immediately. Needs fish >= 3.1 for $last_pid.
 
-set -q HERDR_PANE_ID; or return 0
+# Herdr's TUI gives each pane HERDR_PANE_ID and takes reports over its socket.
+# The desktop app gives each terminal HC_TERMINAL_ID and takes them as OSC 7501
+# sequences written into the terminal. The TUI wins when both are set: that is
+# a Herdr pane inside an app terminal, and the pane is where the command runs.
+set -l key
+if test -n "$HERDR_PANE_ID"
+    set -g _hsp_pane $HERDR_PANE_ID
+    set key (string replace -a ':' '-' -- $HERDR_PANE_ID)
+    set -g _hsp_osc 0
+else if test -n "$HC_TERMINAL_ID"
+    set -g _hsp_pane $HC_TERMINAL_ID
+    set key hc-(string replace -a ':' '-' -- $HC_TERMINAL_ID)
+    set -g _hsp_osc 1
+else
+    return 0
+end
 
 # Locate the binary relative to this file unless the user pinned one.
 if not set -q HSP_BIN
@@ -19,7 +34,7 @@ else
     set root $HOME/.local/state/herdr-shell-progress
 end
 
-set -g _hsp_state_dir $root/(string replace -a ':' '-' -- $HERDR_PANE_ID)
+set -g _hsp_state_dir $root/$key
 set -g _hsp_pid 0
 mkdir -p $_hsp_state_dir
 
@@ -51,13 +66,31 @@ function _hsp_preexec --on-event fish_preexec
         set clear --clear-first
     end
 
+    set -l backend
+    if test $_hsp_osc -eq 1
+        set backend --osc
+        # The desktop app keeps a finished command's record until it is
+        # cleared. Clear it here, while the shell still owns the terminal and
+        # nothing else is writing to it, and only when there is one: an
+        # ordinary command costs no output at all.
+        if test -s $_hsp_state_dir/osc-shown
+            printf '%s' \e']7501;state=clear'\e'\\' >/dev/tty 2>/dev/null
+            true >$_hsp_state_dir/osc-shown
+        end
+        # The watcher reads a non-empty `exit` as "this command is already
+        # over", and a report it never got to finish belongs to some earlier
+        # command.
+        true >$_hsp_state_dir/exit
+        true >$_hsp_state_dir/osc-start
+    end
+
     # fish has no cheap millisecond clock, so the watcher reads its own.
     $HSP_BIN watch \
-        --pane $HERDR_PANE_ID \
+        --pane $_hsp_pane \
         --shell-pid $fish_pid \
         --start-now \
         --state-dir $_hsp_state_dir \
-        $clear >/dev/null 2>&1 &
+        $clear $backend >/dev/null 2>&1 &
     set -g _hsp_pid $last_pid
     disown $_hsp_pid 2>/dev/null
 end
@@ -73,6 +106,14 @@ function _hsp_postexec --on-event fish_postexec
     # keeps its label up for a while) but it is no longer ours to signal, and
     # the PID becomes reusable by the OS the moment it does exit.
     set -g _hsp_pid 0
+    # The desktop app's final report is written from here, in the foreground:
+    # the command is over and the prompt not yet drawn, so nothing else is
+    # writing to the terminal. `osc-start` exists only if the watcher reported
+    # this command, so a fast one costs no fork. It must be tested after `exit`
+    # is written — see `osc_watch.rs` for the race that ordering settles.
+    if test $_hsp_osc -eq 1; and test -s $_hsp_state_dir/osc-start
+        $HSP_BIN finish --state-dir $_hsp_state_dir --exit $code >/dev/null 2>&1
+    end
 end
 
 function _hsp_exit --on-event fish_exit

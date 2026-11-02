@@ -34,6 +34,10 @@ ignore_extra = []
 success_sticky_ms = 20000   # 0 = clear the instant the command finishes
 failure_sticky    = true    # false = failures clear like successes
 
+# In the Herdr desktop app a result stays until your next command: the
+# protocol there has no expiry. 0 still clears a success at once, and
+# failure_sticky = false reports failures as `idle` rather than `error`.
+
 [labels]
 running = "running {elapsed}"
 success = "ok · {elapsed}"

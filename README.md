@@ -19,6 +19,8 @@ sidebar as `sleep 6 · running 4s`, then settles into `sleep 6 · ok · 6s`.*
 - Zero socket traffic and zero output for commands under the threshold — with
   one exception: the first command after a sticky failure label spends two
   requests wiping it, however fast that command is.
+- Works in the Herdr desktop app too, with the same shell setup. See
+  [Herdr desktop app](#herdr-desktop-app) for what differs there.
 
 ## keylock sessions
 
@@ -54,7 +56,7 @@ probe runs — mainly useful for debugging.
 
 ## Requirements
 
-- Herdr >= 0.7.0
+- Herdr >= 0.7.0, or the Herdr desktop app (tested with 0.1.11)
 - **zsh, bash >= 3.2, or fish >= 3.1** — each has its own hook file under
   `shell/`. Any other shell needs a port; see
   [Porting to another shell](#porting-to-another-shell).
@@ -305,6 +307,56 @@ Then `herdr config check` and `herdr server reload-config`. This is the plain
 This also affects the finish labels: `ok · 4s`, `exit 1 · 12s`, and `SIGINT · 3s`
 all live in `state_text`.
 
+## Herdr desktop app
+
+The desktop app runs its terminals in herdr-core instead of the Herdr server,
+and herdr-core has no socket method for reporting a pane's state. A program
+reports by printing an [OSC 7501][psp] escape sequence into its own terminal,
+which is how Claude Code shows up in the app's agent list. The hooks speak that
+protocol when they find themselves in an app terminal, so nothing changes in
+your rc file: the snippet from [Install](#install) works in both.
+
+The hooks tell the two apart by environment. Herdr panes have `HERDR_PANE_ID`;
+desktop-app terminals have `HC_TERMINAL_ID`. When both are set — a Herdr pane
+running inside an app terminal — the pane wins, since that is where the command
+runs.
+
+In the app, a slow command makes its terminal an agent:
+
+| What happened | State | Message |
+|---|---|---|
+| running past the threshold | `working` | the command line |
+| finished with exit 0 | `done` | `ok · 4m12s` |
+| failed | `error` | `exit 1 · 12s` |
+| Ctrl+C, or a signal | `idle` | `SIGINT · 3s` |
+
+The report's `app` is the program name (`cargo`, `npm`), so the app draws that
+program's icon. The message is in the report too — `hc get <terminal>` prints
+it, and mods can read it — but the app's own agent list shows only the state and
+how long the terminal has been in it.
+
+Some things work differently:
+
+- **No ticking label.** The app already shows how long an agent has been in its
+  state, and every report written into a busy terminal is a chance of landing
+  in the middle of the program's own output. So the watcher writes exactly one
+  report, at the threshold, and nothing more while the command runs.
+- **Results stay until your next command.** The protocol has no expiry, so
+  `success_sticky_ms` cannot be a duration here. `done` turns into `idle` once
+  you look at the terminal, and your next command clears it either way.
+  `success_sticky_ms = 0` still clears a success the moment it finishes, and
+  `failure_sticky = false` reports a failure as `idle` instead of `error`.
+- **No keylock 🔒.** Keeping the lock up to date needs a report every tick.
+- **[Showing the elapsed label](#showing-the-elapsed-label) does not apply.**
+  `[ui.sidebar.agents]` configures the Herdr TUI, not the app.
+
+The config file lives where it does for the Herdr TUI:
+`~/.config/herdr/plugins/config/bayoudhi.shell-progress/config.toml`. Without
+the `herdr` CLI there is no `herdr plugin install` either; install
+[from a clone](#from-a-clone-instead) and skip the `herdr plugin link` step.
+
+[psp]: https://superlogical.com/rex/docs/build/program-status
+
 ## How it works
 
 The pre-command hook spawns a detached watcher. The watcher sleeps until the
@@ -319,6 +371,16 @@ fish a second fork for `kill`, which it has no builtin for.
 
 The watcher writes nothing to stdout or stderr — it inherits the pane's tty, so
 any output would corrupt your shell session.
+
+In the desktop app, the watcher reports by opening `/dev/tty` and writing one
+OSC 7501 sequence when the command crosses the threshold. The final report is
+not the watcher's: the pre-prompt hook runs `herdr-shell-progress finish`
+in the foreground, after the command has ended and before the prompt is drawn,
+when nothing else is writing to the terminal. The pre-command hook clears the
+previous command's record the same way, with a `printf`. A command that never
+crosses the threshold writes nothing and costs no extra fork. `src/osc_watch.rs`
+explains how the watcher and `finish` stay in order when the command ends just
+as the watcher decides to report it.
 
 ## Porting to another shell
 
@@ -335,6 +397,19 @@ lines, and a port needs to do three things:
 2. On command end: write `$?` to `<state-dir>/exit`, then send `SIGUSR1` to the
    watcher.
 3. On shell exit: send `SIGTERM` to the watcher.
+
+For the desktop app, used when `HC_TERMINAL_ID` is set and `HERDR_PANE_ID` is
+not, a port changes those steps:
+
+1. Pass `--pane "$HC_TERMINAL_ID" --osc` to `watch`, and use its own state
+   directory (the hooks use `hc-<terminal id>`). Before spawning it, if
+   `<state-dir>/osc-shown` is non-empty, print `ESC ] 7501 ; state=clear ESC \`
+   to `/dev/tty` and empty the file. Then empty `<state-dir>/exit` and
+   `<state-dir>/osc-start`.
+2. After signalling the watcher, and only then, check `<state-dir>/osc-start`.
+   If it is non-empty, run `herdr-shell-progress finish --state-dir <state-dir>
+   --exit <status>` in the foreground, with both streams redirected to
+   `/dev/null`.
 
 There is one optional fourth: a shell whose pre-command hook cannot see both the
 whole command line and its alias-expanded form — bash is the only one so far —
