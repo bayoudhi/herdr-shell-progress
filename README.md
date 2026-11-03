@@ -4,13 +4,20 @@ Herdr shows live progress for recognized coding agents. A pane running
 `cargo build --release` for four minutes shows nothing at all.
 
 This plugin fixes that: slow shell commands report `working` with a ticking
-elapsed label, and leave a result behind when they finish.
+elapsed label, and leave a result behind when they finish. It works in both
+the Herdr TUI and the [Herdr desktop app](#herdr-desktop-app), with the same
+shell setup.
 
 ![demo](demo/demo.gif)
 
-*`ls` leaves no trace; `sleep 6` crosses the threshold and appears in the
-sidebar as `sleep 6 · running 4s`, then settles into `sleep 6 · ok · 6s`.*
+*In the Herdr TUI: `ls` leaves no trace; `sleep 6` crosses the threshold and
+appears in the sidebar as `sleep 6 · running 4s`, then settles into
+`sleep 6 · ok · 6s`. [The desktop app](#herdr-desktop-app) shows it in its
+Agents list.*
 
+- Works in the Herdr TUI and the Herdr desktop app. The rc snippet picks the
+  right one for each terminal; see [Herdr desktop app](#herdr-desktop-app) for
+  what differs there.
 - Fast commands are invisible — nothing flickers when you run `ls`.
 - Failures stick until your next command, so you see what broke while away.
 - Successes clear themselves after 20 seconds by default.
@@ -19,8 +26,6 @@ sidebar as `sleep 6 · running 4s`, then settles into `sleep 6 · ok · 6s`.*
 - Zero socket traffic and zero output for commands under the threshold — with
   one exception: the first command after a sticky failure label spends two
   requests wiping it, however fast that command is.
-- Works in the Herdr desktop app too, with the same shell setup. See
-  [Herdr desktop app](#herdr-desktop-app) for what differs there.
 
 ## keylock sessions
 
@@ -338,12 +343,23 @@ runs.
 
 In the app, a slow command makes its terminal an agent:
 
+![desktop app demo](demo/app.gif)
+
+*`ls shell` leaves no trace; `sleep 6` crosses the threshold, shows up under
+**Working** in the Agents list as `demo · sleep 6`, and lands under **Done**
+when it finishes.*
+
 | What happened | State | Message |
 |---|---|---|
 | running past the threshold | `working` | the command line |
 | finished with exit 0 | `done` | `ok · 4m12s` |
 | failed | `error` | `exit 1 · 12s` |
 | Ctrl+C, or a signal | `idle` | `SIGINT · 3s` |
+
+A row in the Agents list reads `<space> · <title>`, and the title is the
+terminal's own, which your shell sets. oh-my-zsh, for one, sets it to the
+command line while it runs, so the row reads `api · cargo build`; a shell that
+never sets one shows the terminal's address (`t1`) there instead.
 
 The report's `app` is the program name (`cargo`, `npm`), so the app draws that
 program's icon. The message is in the report too — `hc get <terminal>` prints
