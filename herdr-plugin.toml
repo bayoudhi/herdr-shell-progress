@@ -2,7 +2,7 @@ id = "bayoudhi.shell-progress"
 name = "Shell Progress"
 version = "0.5.1"
 min_herdr_version = "0.7.0"
-description = "Shows sidebar progress for slow shell commands, not just agents"
+description = "Shows progress for slow shell commands, not just agents, in the Herdr TUI and desktop app"
 platforms = ["macos", "linux"]
 
 [[build]]
