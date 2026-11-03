@@ -1,6 +1,6 @@
 id = "bayoudhi.shell-progress"
 name = "Shell Progress"
-version = "0.5.0"
+version = "0.5.1"
 min_herdr_version = "0.7.0"
 description = "Shows sidebar progress for slow shell commands, not just agents"
 platforms = ["macos", "linux"]
@@ -10,6 +10,6 @@ command = ["cargo", "build", "--release"]
 
 [[actions]]
 id = "print-snippet"
-title = "Print the zsh setup snippet"
+title = "Print the shell setup snippet"
 contexts = ["workspace"]
 command = ["bash", "scripts/print-snippet.sh"]
