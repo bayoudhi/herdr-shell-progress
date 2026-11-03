@@ -346,7 +346,8 @@ In the app, a slow command makes its terminal an agent:
 ![desktop app demo](demo/app.gif)
 
 *`ls shell` leaves no trace; `sleep 6` crosses the threshold, shows up under
-**Working** in the Agents list, and lands under **Done** when it finishes.*
+**Working** in the Agents list as `demo · sleep 6`, and lands under **Done**
+when it finishes.*
 
 | What happened | State | Message |
 |---|---|---|
@@ -354,6 +355,11 @@ In the app, a slow command makes its terminal an agent:
 | finished with exit 0 | `done` | `ok · 4m12s` |
 | failed | `error` | `exit 1 · 12s` |
 | Ctrl+C, or a signal | `idle` | `SIGINT · 3s` |
+
+A row in the Agents list reads `<space> · <title>`, and the title is the
+terminal's own, which your shell sets. oh-my-zsh, for one, sets it to the
+command line while it runs, so the row reads `api · cargo build`; a shell that
+never sets one shows the terminal's address (`t1`) there instead.
 
 The report's `app` is the program name (`cargo`, `npm`), so the app draws that
 program's icon. The message is in the report too — `hc get <terminal>` prints

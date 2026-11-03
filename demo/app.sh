@@ -12,17 +12,18 @@
 # window alone would still list yours. The demo gets:
 #
 #   - its own core: HC_SESSION plus scratch XDG_STATE_HOME / XDG_CONFIG_HOME;
-#   - its own window: HERDR_APP_HOME, launched hidden by `open`, so it inherits
-#     none of this terminal's HC_* variables;
+#   - its own window: HERDR_APP_HOME, started by `open`, so it inherits none of
+#     this terminal's HC_* variables;
 #   - a bare zsh (ZDOTDIR) that loads the installed plugin exactly as the README
-#     tells you to.
+#     tells you to, and sets the terminal title the way oh-my-zsh does.
 #
 # All of it is torn down at the end, including on Ctrl+C.
 #
-# The window stays hidden for a reason beyond tidiness: Herdr turns `done` into
-# `idle` as soon as someone looks at the terminal, and a window that takes focus
-# counts as looking. Don't bring it forward while it records; the script warns
-# if the last scene was lost that way.
+# Herdr turns `done` into `idle` as soon as someone looks at the terminal, and
+# a terminal shown in the focused window counts. The window takes focus when it
+# opens, so the script hands focus back to whatever had it before; if it can't,
+# it asks you to click another window. Don't bring the demo forward while it
+# records; the script warns if the last scene was lost that way.
 #
 # Record from main: the Spaces row shows the folder's branch.
 #
@@ -56,12 +57,23 @@ trap teardown EXIT
 
 cat >"$work/zdot/.zshrc" <<'EOF'
 PROMPT='%F{blue}%1~%f %F{magenta}❯%f '
+# The terminal title, set the way oh-my-zsh sets it: the command line while it
+# runs, user@host: folder at the prompt. The agent row puts a telling title after
+# the space name and skips user@host ones, so it reads `demo · sleep 6`, then
+# `demo`. A shell that never sets a title shows `t1` there instead.
+preexec() { print -rn -- $'\e]2;'"$1"$'\a'; }
+precmd() { print -Pn '\e]2;user@host: %~\a'; }
 () {
   local f=(~/.config/herdr/plugins/github-installations/bayoudhi.shell-progress-*/*/checkout/shell/init.zsh(Nom)
            ~/.config/herdr/plugins/github/bayoudhi.shell-progress-*/shell/init.zsh(Nom))
   (( $#f )) && source $f[1]
 }
 EOF
+
+# A fresh home opens with a welcome dialog, and a newer app with its notes.
+version=$(herdr-app --version | awk '{print $2}')
+printf '%s\n' '{"layout": "main", "workspace.panels": [], "frame.welcomed": "finished"}' >"$HERDR_APP_HOME/shared.json"
+printf '{"last_run": "%s", "presented": []}\n' "$version" >"$HERDR_APP_HOME/update-notes.json"
 
 # Dark, like the TUI demo, and silent.
 settings() {
@@ -73,6 +85,11 @@ settings
 # Terminals inherit the core's environment, so ZDOTDIR goes here.
 ZDOTDIR=$work/zdot hc server start >/dev/null
 
+front() { lsappinfo info -only pid "$(lsappinfo front)" | grep -oE 'pid = [0-9]+' | grep -oE '[0-9]+'; }
+before=$(front)
+
+# Background and hidden is only how it starts: it shows itself and takes focus
+# anyway, which is handled below.
 open -g -j -n -a /Applications/Herdr.app \
   --env HC_SESSION="$HC_SESSION" \
   --env XDG_STATE_HOME="$XDG_STATE_HOME" \
@@ -93,7 +110,7 @@ herdr-app ls | python3 -c 'import json,sys; [print(s["id"]) for s in json.load(s
 settings
 herdr-app do app.theme '{"name":"graphite"}' >/dev/null
 
-# A fresh home greets you with a welcome dialog over the window.
+# In case a dialog opened anyway.
 for _ in 1 2 3; do
   herdr-app status | python3 -c 'import json,sys; sys.exit(not json.load(sys.stdin)["overlays"])' || break
   herdr-app do overlay.close >/dev/null
@@ -107,6 +124,21 @@ for _ in $(seq 40); do
   hc read "$term" 2>/dev/null | grep -q '❯' && break
   sleep 0.25
 done
+
+# The window takes focus when it opens, however it is launched, and Herdr
+# counts a terminal shown in the focused window as looked at: `done` would turn
+# `idle` on screen. It has to stay on screen to keep drawing (minimized, it
+# stops), so focus goes back to whatever had it before.
+demo=$(pgrep -n -f /Applications/Herdr.app/Contents/MacOS/Herdr)
+osascript -l JavaScript -e "ObjC.import('AppKit'); \$.NSRunningApplication.runningApplicationWithProcessIdentifier($before).activateWithOptions(2)" >/dev/null 2>&1 || true
+sleep 0.5
+if [[ $(front) == "$demo" ]]; then
+  echo "Click any window other than the demo to start recording." >&2
+  for _ in $(seq 240); do
+    [[ $(front) != "$demo" ]] && break
+    sleep 0.25
+  done
+fi
 sleep 1
 
 type_keys() {
