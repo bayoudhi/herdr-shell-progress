@@ -10,6 +10,6 @@ command = ["cargo", "build", "--release"]
 
 [[actions]]
 id = "print-snippet"
-title = "Print the zsh setup snippet"
+title = "Print the shell setup snippet"
 contexts = ["workspace"]
 command = ["bash", "scripts/print-snippet.sh"]

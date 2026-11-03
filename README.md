@@ -74,17 +74,25 @@ herdr plugin install bayoudhi/herdr-shell-progress
 
 That runs `cargo build --release` for you.
 
-Now add the hook to your shell's rc file. Installed plugins live under a
-content-hashed directory, so each snippet matches it with a glob and takes the
-newest, rather than hardcoding a path that changes on every update. If the
-plugin isn't installed, they do nothing.
+Now add the hook to your shell's rc file. herdr checks every install out into
+a fresh directory, and where depends on its version:
+
+- herdr 0.9.5 and later:
+  `~/.config/herdr/plugins/github-installations/bayoudhi.shell-progress-<hash>/<generation>/checkout`
+- older herdr: `~/.config/herdr/plugins/github/bayoudhi.shell-progress-<hash>`
+
+So each snippet finds the plugin with a glob instead of hardcoding a path that
+changes on every update. It looks in the newer location first, so a copy an
+older herdr left behind never wins, and takes the newest build there. If the
+plugin isn't installed, it does nothing.
 
 **zsh** — append to `~/.zshrc`:
 
 ```zsh
 # herdr-shell-progress
 () {
-  local f=(~/.config/herdr/plugins/github/bayoudhi.shell-progress-*/shell/init.zsh(Nom))
+  local f=(~/.config/herdr/plugins/github-installations/bayoudhi.shell-progress-*/*/checkout/shell/init.zsh(Nom)
+           ~/.config/herdr/plugins/github/bayoudhi.shell-progress-*/shell/init.zsh(Nom))
   (( $#f )) && source $f[1]
 }
 ```
@@ -96,7 +104,9 @@ makes a missing match empty instead of an error, and `om` orders newest-first.
 
 ```bash
 # herdr-shell-progress
-_hsp_dir=$(ls -td ~/.config/herdr/plugins/github/bayoudhi.shell-progress-*/ 2>/dev/null | head -1)
+_hsp_dir=$(ls -td ~/.config/herdr/plugins/github-installations/bayoudhi.shell-progress-*/*/checkout/ 2>/dev/null | head -1)
+[ -r "$_hsp_dir/shell/init.bash" ] ||
+  _hsp_dir=$(ls -td ~/.config/herdr/plugins/github/bayoudhi.shell-progress-*/ 2>/dev/null | head -1)
 [ -r "$_hsp_dir/shell/init.bash" ] && . "$_hsp_dir/shell/init.bash"
 unset _hsp_dir
 ```
@@ -105,13 +115,17 @@ unset _hsp_dir
 
 ```fish
 # herdr-shell-progress
-for d in (ls -td ~/.config/herdr/plugins/github/bayoudhi.shell-progress-*/ 2>/dev/null)
-    if test -r $d/shell/init.fish
-        source $d/shell/init.fish
-        break
-    end
+set -l _hsp_dirs ~/.config/herdr/plugins/github-installations/bayoudhi.shell-progress-*/*/checkout
+set -q _hsp_dirs[1]; or set _hsp_dirs ~/.config/herdr/plugins/github/bayoudhi.shell-progress-*
+if set -q _hsp_dirs[1]
+    set _hsp_dirs (ls -td $_hsp_dirs)
+    test -r "$_hsp_dirs[1]/shell/init.fish"; and source "$_hsp_dirs[1]/shell/init.fish"
 end
 ```
+
+The globs go through `set` because there a pattern may match nothing. Handed to
+`ls` directly, a pattern with no match makes fish print an error at every shell
+start.
 
 Then open a **new** pane — an rc file only runs for new shells — and run
 `sleep 5`.
@@ -154,11 +168,12 @@ herdr plugin list --json \
   | python3 -c 'import json,sys;print(next(p["plugin_root"] for p in json.load(sys.stdin)["result"]["plugins"] if p["plugin_id"]=="bayoudhi.shell-progress"))'
 ```
 
-There is also a `print-snippet` action, but note that
+There is also a `print-snippet` action. It prints the block above for your
+`$SHELL`, or a plain `source` line for a linked clone. Note that
 `herdr plugin action invoke` returns an invocation record on stdout and sends
 the action's own output to the plugin log — so you would need
-`herdr plugin log list --plugin bayoudhi.shell-progress` to read it. The glob
-above avoids that entirely.
+`herdr plugin log list --plugin bayoudhi.shell-progress` to read it. Copying the
+block from here avoids that entirely.
 
 </details>
 
