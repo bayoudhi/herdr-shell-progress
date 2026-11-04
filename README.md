@@ -73,6 +73,17 @@ probe runs — mainly useful for debugging.
 
 ## Install
 
+How you install depends on which Herdr you run:
+
+- **Herdr TUI**, with or without the desktop app: `herdr plugin install`,
+  below.
+- **The desktop app only**: [build from a clone](#desktop-app-only). The app
+  has no plugin manager — it is extended with mods, not plugins — and this
+  plugin does not need one there. In the app it is just the shell hook and the
+  watcher binary.
+
+Either way, the hook in your rc file serves the TUI and the app alike.
+
 ```bash
 herdr plugin install bayoudhi/herdr-shell-progress
 ```
@@ -195,11 +206,30 @@ echo 'source ~/herdr-shell-progress/shell/init.zsh' >> ~/.zshrc  # init.bash / i
 `herdr plugin link` deliberately does *not* run build commands, so the
 `cargo build` is required here.
 
+### Desktop app only
+
+Without the Herdr TUI there is no `herdr` CLI, so there is no
+`herdr plugin install` to run. Build a clone and source the hook from it:
+
+```bash
+git clone https://github.com/bayoudhi/herdr-shell-progress ~/herdr-shell-progress
+cd ~/herdr-shell-progress
+cargo build --release
+echo 'source ~/herdr-shell-progress/shell/init.zsh' >> ~/.zshrc  # init.bash / init.fish
+```
+
+Then open a **new** terminal in the app and run `sleep 5`: the terminal shows
+up under **Working** in the Agents list. To update, `git pull` and run
+`cargo build --release` again.
+
 ## Configure
 
 ```bash
 herdr plugin config-dir bayoudhi.shell-progress
 ```
+
+Without the `herdr` CLI, the directory is
+`~/.config/herdr/plugins/config/bayoudhi.shell-progress`.
 
 Copy `config.example.toml` into that directory as `config.toml`. Every key is
 optional. Changes take effect on your next command — no reload, no restart.
@@ -382,9 +412,8 @@ Some things work differently:
   `[ui.sidebar.agents]` configures the Herdr TUI, not the app.
 
 The config file lives where it does for the Herdr TUI:
-`~/.config/herdr/plugins/config/bayoudhi.shell-progress/config.toml`. Without
-the `herdr` CLI there is no `herdr plugin install` either; install
-[from a clone](#from-a-clone-instead) and skip the `herdr plugin link` step.
+`~/.config/herdr/plugins/config/bayoudhi.shell-progress/config.toml`. To install
+without the Herdr TUI, see [Desktop app only](#desktop-app-only).
 
 [psp]: https://superlogical.com/rex/docs/build/program-status
 
@@ -458,7 +487,8 @@ herdr plugin uninstall bayoudhi.shell-progress
 ```
 
 Use `herdr plugin unlink bayoudhi.shell-progress` instead if you installed from
-a clone with `plugin link`.
+a clone with `plugin link`. For a [desktop-app-only](#desktop-app-only)
+install, delete the clone.
 
 Then remove the block from your shell's rc file. It is what actually runs the
 plugin, so leaving it behind after uninstalling leaves a dangling `source` that
