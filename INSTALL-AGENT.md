@@ -33,14 +33,17 @@ Run:
 command -v herdr && herdr --version
 ```
 
-- **`herdr` is found and the version is 0.7.0 or newer:** use the
-  [TUI path](#step-3a-tui-path). This is also right if the user runs the
-  desktop app as well — the same hook serves both.
+- **`herdr` is found and the version is 0.7.0 or newer:** you will take the
+  [TUI path](#step-3a-tui-path) in step 3. This is also right if the user runs
+  the desktop app as well — the same hook serves both.
 - **`herdr` is found but older than 0.7.0:** stop. Tell the user the plugin
   needs Herdr 0.7.0 or newer.
 - **`herdr` is not found:** ask the user whether they run the Herdr desktop
-  app. If yes, use the [desktop-app path](#step-3b-desktop-app-path). If no,
-  stop: the plugin needs one of the two.
+  app. If yes, you will take the
+  [desktop-app path](#step-3b-desktop-app-path) in step 3. If no, stop: the
+  plugin needs one of the two.
+
+Either way, do step 2 next. Do not skip it.
 
 ## Step 2: Check the prerequisites
 
@@ -105,10 +108,16 @@ grep -n 'herdr-shell-progress' <rc file>
 ```
 
 If that finds a line, the hook is already installed. Do not add a second one;
-skip to [step 5](#step-5-check-the-hook-loads).
+skip to [step 5](#step-5-check-the-hook-loads). If it finds nothing, or the rc
+file does not exist yet (grep then exits 2 with "No such file"), the hook is
+not installed.
 
-Otherwise show the user the block below and the rc file it goes in, ask for a
-yes, then append it at the end of the file, after a blank line.
+Show the user the block below and the rc file it goes in, and ask for a yes.
+Then:
+
+- **The rc file exists:** append the block at the end, after a blank line.
+- **It does not exist:** create it with just the block in it. For fish, create
+  its directory first: `mkdir -p ~/.config/fish`.
 
 ### Installed block (TUI path)
 
@@ -158,10 +167,25 @@ Two lines, for the user's shell:
 
 ### bash on macOS
 
-macOS terminals start bash as a login shell, which reads `~/.bash_profile`
-rather than `~/.bashrc`. If the user's shell is bash, check that
-`~/.bash_profile` sources `~/.bashrc` (`grep -n bashrc ~/.bash_profile`). If it
-does not, tell the user; do not edit `~/.bash_profile` without asking.
+macOS terminals usually start bash as a login shell, which reads
+`~/.bash_profile` rather than `~/.bashrc`. If the user's shell is bash and
+`uname -s` printed `Darwin`, check that `~/.bash_profile` sources `~/.bashrc`:
+
+```bash
+grep -n bashrc ~/.bash_profile
+```
+
+If that finds a line, nothing to do. If it finds nothing, or `~/.bash_profile`
+does not exist, tell the user that login shells will not load the hook, and
+offer to add this line to `~/.bash_profile` (creating the file if it is
+missing):
+
+```bash
+[ -f ~/.bashrc ] && . ~/.bashrc
+```
+
+Add it only after a yes. On a no, carry on: step 5 then checks only
+non-login shells, so say so.
 
 ## Step 5: Check the hook loads
 
@@ -175,11 +199,23 @@ env -u HERDR_PANE_ID HC_TERMINAL_ID=hsp-check bash -ic 'declare -F _hsp_preexec 
 env -u HERDR_PANE_ID HC_TERMINAL_ID=hsp-check fish -ic 'functions -q _hsp_preexec; and echo HSP_LOADED'
 ```
 
-It prints `HSP_LOADED` when the hook loaded. Then remove the state directory
-the check created:
+For bash on macOS, also run the login-shell variant, which reads
+`~/.bash_profile` the way the user's terminal will:
+
+```bash
+env -u HERDR_PANE_ID HC_TERMINAL_ID=hsp-check bash -lic 'declare -F _hsp_preexec >/dev/null && echo HSP_LOADED'
+```
+
+It prints `HSP_LOADED` when the hook loaded. A shell may also print noise such
+as `bash: no job control in this shell` on stderr; that is harmless and comes
+from running an interactive shell without a terminal.
+
+Then remove the state directory the check created, and its parent if the
+check left it empty:
 
 ```bash
 rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/herdr-shell-progress/hc-hsp-check"
+rmdir "${XDG_STATE_HOME:-$HOME/.local/state}/herdr-shell-progress" 2>/dev/null || true
 ```
 
 If it does not print `HSP_LOADED`:
@@ -194,12 +230,19 @@ If it does not print `HSP_LOADED`:
 
 ## Step 6: Tell the user how to see it
 
-Tell the user, in these words or close to them:
+Tell the user, in these words or close to them. Give only the version for the
+path you took.
 
-> Open a **new** pane (or a new terminal in the desktop app) — an rc file only
-> runs for new shells — and run `sleep 5`. After a second it shows as working:
-> in the Herdr TUI sidebar as `sleep 5`, in the desktop app under **Working**
-> in the Agents list.
+TUI path:
+
+> Open a **new** pane — an rc file only runs for new shells — and run
+> `sleep 5`. After two seconds it shows in the Herdr sidebar as `sleep 5`.
+
+Desktop-app path:
+
+> Open a **new** terminal in the app — an rc file only runs for new shells —
+> and run `sleep 5`. After two seconds the terminal shows under **Working** in
+> the Agents list.
 
 ## Step 7 (TUI path only): Offer the elapsed label
 
