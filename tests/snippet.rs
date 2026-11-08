@@ -151,13 +151,17 @@ const HOUR: Duration = Duration::from_secs(3600);
 
 #[test]
 fn the_readme_shows_exactly_what_print_snippet_prints() {
-    let readme = fs::read_to_string(Path::new(REPO).join("README.md")).unwrap();
-    for shell in SHELLS {
-        let fenced = format!("```{}\n{}```\n", shell.name(), installed_block(shell));
-        assert!(
-            readme.contains(&fenced),
-            "README.md has no copy of the {shell:?} block print-snippet prints:\n{fenced}"
-        );
+    // INSTALL-AGENT.md tells agents to copy its blocks byte for byte, so it is
+    // held to the same blocks as the README.
+    for doc in ["README.md", "INSTALL-AGENT.md"] {
+        let text = fs::read_to_string(Path::new(REPO).join(doc)).unwrap();
+        for shell in SHELLS {
+            let fenced = format!("```{}\n{}```\n", shell.name(), installed_block(shell));
+            assert!(
+                text.contains(&fenced),
+                "{doc} has no copy of the {shell:?} block print-snippet prints:\n{fenced}"
+            );
+        }
     }
 }
 
