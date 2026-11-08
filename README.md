@@ -93,6 +93,21 @@ How you install depends on which Herdr you run:
 
 Either way, the hook in your rc file serves the TUI and the app alike.
 
+### Let your coding agent do it
+
+[`INSTALL-AGENT.md`](INSTALL-AGENT.md) walks a coding agent through either
+path: it checks which Herdr you run, your shell and your Rust toolchain,
+builds the plugin, and shows you the rc-file lines before adding them. Paste
+this into Claude Code, Codex or any agent that can run shell commands:
+
+```text
+Install herdr-shell-progress for me by following
+https://github.com/bayoudhi/herdr-shell-progress/blob/main/INSTALL-AGENT.md
+```
+
+It never runs `sudo`, never installs Rust for you, and never edits Herdr's own
+`config.toml`.
+
 ### Desktop app only
 
 Without the Herdr TUI there is no `herdr` CLI, so there is no
