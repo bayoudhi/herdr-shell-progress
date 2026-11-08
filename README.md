@@ -8,12 +8,21 @@ elapsed label, and leave a result behind when they finish. It works in both
 the Herdr TUI and the [Herdr desktop app](#herdr-desktop-app), with the same
 shell setup.
 
+**In the Herdr TUI**
+
 ![demo](demo/demo.gif)
 
-*In the Herdr TUI: `ls` leaves no trace; `sleep 6` crosses the threshold and
-appears in the sidebar as `sleep 6 · running 4s`, then settles into
-`sleep 6 · ok · 6s`. [The desktop app](#herdr-desktop-app) shows it in its
-Agents list.*
+*`ls` leaves no trace; `sleep 6` crosses the threshold and appears in the
+sidebar as `sleep 6 · running 4s`, then settles into `sleep 6 · ok · 6s`.*
+
+**In the Herdr desktop app**
+
+![desktop app demo](demo/app.gif)
+
+*`ls shell` leaves no trace; `sleep 6` crosses the threshold, shows up under
+**Working** in the Agents list as `demo · sleep 6`, and lands under **Done**
+when it finishes. No `herdr` CLI needed — see
+[Desktop app only](#desktop-app-only).*
 
 - Works in the Herdr TUI and the Herdr desktop app. The rc snippet picks the
   right one for each terminal; see [Herdr desktop app](#herdr-desktop-app) for
@@ -75,14 +84,33 @@ probe runs — mainly useful for debugging.
 
 How you install depends on which Herdr you run:
 
-- **Herdr TUI**, with or without the desktop app: `herdr plugin install`,
-  below.
-- **The desktop app only**: [build from a clone](#desktop-app-only). The app
-  has no plugin manager — it is extended with mods, not plugins — and this
-  plugin does not need one there. In the app it is just the shell hook and the
-  watcher binary.
+- **The desktop app only**: [build from a clone](#desktop-app-only), just
+  below. The app has no plugin manager — it is extended with mods, not
+  plugins — and this plugin does not need one there. In the app it is just the
+  shell hook and the watcher binary.
+- **Herdr TUI**, with or without the desktop app:
+  [`herdr plugin install`](#herdr-tui).
 
 Either way, the hook in your rc file serves the TUI and the app alike.
+
+### Desktop app only
+
+Without the Herdr TUI there is no `herdr` CLI, so there is no
+`herdr plugin install` to run. Build a clone and source the hook from it:
+
+```bash
+git clone https://github.com/bayoudhi/herdr-shell-progress ~/herdr-shell-progress
+cd ~/herdr-shell-progress
+cargo build --release
+echo 'source ~/herdr-shell-progress/shell/init.zsh' >> ~/.zshrc  # init.bash / init.fish
+```
+
+Then open a **new** terminal in the app and run `sleep 5`: the terminal shows
+up under **Working** in the Agents list. To update, `git pull` and run
+`cargo build --release` again. [Herdr desktop app](#herdr-desktop-app) covers
+what the app shows and what differs from the TUI.
+
+### Herdr TUI
 
 ```bash
 herdr plugin install bayoudhi/herdr-shell-progress
@@ -205,22 +233,6 @@ echo 'source ~/herdr-shell-progress/shell/init.zsh' >> ~/.zshrc  # init.bash / i
 
 `herdr plugin link` deliberately does *not* run build commands, so the
 `cargo build` is required here.
-
-### Desktop app only
-
-Without the Herdr TUI there is no `herdr` CLI, so there is no
-`herdr plugin install` to run. Build a clone and source the hook from it:
-
-```bash
-git clone https://github.com/bayoudhi/herdr-shell-progress ~/herdr-shell-progress
-cd ~/herdr-shell-progress
-cargo build --release
-echo 'source ~/herdr-shell-progress/shell/init.zsh' >> ~/.zshrc  # init.bash / init.fish
-```
-
-Then open a **new** terminal in the app and run `sleep 5`: the terminal shows
-up under **Working** in the Agents list. To update, `git pull` and run
-`cargo build --release` again.
 
 ## Configure
 
@@ -371,13 +383,8 @@ desktop-app terminals have `HC_TERMINAL_ID`. When both are set — a Herdr pane
 running inside an app terminal — the pane wins, since that is where the command
 runs.
 
-In the app, a slow command makes its terminal an agent:
-
-![desktop app demo](demo/app.gif)
-
-*`ls shell` leaves no trace; `sleep 6` crosses the threshold, shows up under
-**Working** in the Agents list as `demo · sleep 6`, and lands under **Done**
-when it finishes.*
+In the app, a slow command makes its terminal an agent, as the
+[second demo](#herdr-shell-progress) at the top shows:
 
 | What happened | State | Message |
 |---|---|---|
